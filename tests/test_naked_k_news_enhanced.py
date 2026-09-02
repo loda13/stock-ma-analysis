@@ -218,6 +218,72 @@ class EnhancedNewsCollectionTests(NoNetworkMixin, unittest.TestCase):
             ["Pinduoduo PDD", "拼多多 PDD", "Pinduoduo Temu"],
         )
 
+    def test_merge_drops_old_provider_items_when_fresh_items_exist(self) -> None:
+        mapping = {"1810.HK": {"zh": ["小米"], "en": ["Xiaomi"]}}
+        fresh = collection_item(
+            title="小米发布新车",
+            published_at="2026-07-19T08:00:00+00:00",
+            source_provider="akshare_em",
+            url="https://akshare.example/xiaomi-fresh",
+        )
+        stale = collection_item(
+            title="小米旧闻回顾",
+            published_at="2026-07-10T08:00:00+00:00",
+            source_provider="akshare_em",
+            url="https://akshare.example/xiaomi-stale",
+        )
+
+        with only_akshare(mapping, [fresh, stale]):
+            result = naked_k_news_enhanced.collect_news_enhanced(
+                "小米", "1810.HK", now=NOW, use_finnhub=False, lookback_days=7
+            )
+
+        self.assertEqual([item["title"] for item in result["items"]], ["小米发布新车"])
+        self.assertEqual(result["window_days"], 7)
+        self.assertEqual(result["freshness"], "fresh")
+
+    def test_merge_labels_stale_only_items_as_low_freshness(self) -> None:
+        mapping = {"1810.HK": {"zh": ["小米"], "en": ["Xiaomi"]}}
+        stale = collection_item(
+            title="小米旧闻回顾",
+            published_at="2026-07-10T08:00:00+00:00",
+            source_provider="akshare_em",
+            url="https://akshare.example/xiaomi-stale",
+        )
+
+        with only_akshare(mapping, [stale]):
+            result = naked_k_news_enhanced.collect_news_enhanced(
+                "小米",
+                "1810.HK",
+                now=NOW,
+                use_finnhub=False,
+                lookback_days=7,
+                fallback_days=30,
+            )
+
+        self.assertEqual(result["window_days"], 30)
+        self.assertEqual(result["freshness"], "low_freshness")
+        self.assertEqual(result["items"][0]["freshness"], "low_freshness")
+
+    def test_merge_excludes_future_items_and_reports_insufficient_metadata(self) -> None:
+        mapping = {"1810.HK": {"zh": ["小米"], "en": ["Xiaomi"]}}
+        future = collection_item(
+            title="小米未来公告",
+            published_at="2026-07-21T08:00:00+00:00",
+            source_provider="akshare_em",
+            url="https://akshare.example/xiaomi-future",
+        )
+
+        with only_akshare(mapping, [future]):
+            result = naked_k_news_enhanced.collect_news_enhanced(
+                "小米", "1810.HK", now=NOW, use_finnhub=False, lookback_days=7
+            )
+
+        self.assertEqual(result["status"], "insufficient")
+        self.assertEqual(result["window_days"], 7)
+        self.assertEqual(result["freshness"], "insufficient")
+        self.assertEqual(result["items"], [])
+
     def test_short_keywords_use_word_boundaries(self) -> None:
         keywords = ["mi"]
 
@@ -597,7 +663,7 @@ class EnhancedNewsCollectionTests(NoNetworkMixin, unittest.TestCase):
         mapping = {"1810.HK": {"zh": ["小米"], "en": ["Xiaomi"], "keywords": ["Mi"]}}
         sina_item = collection_item(
             title="新车定价25.99万元起",
-            published_at="2026-07-30T02:00:00+00:00",
+            published_at="2026-07-19T02:00:00+00:00",
             source_provider="sina",
             url="",
         )
@@ -612,7 +678,7 @@ class EnhancedNewsCollectionTests(NoNetworkMixin, unittest.TestCase):
         )
 
     def test_sina_outranks_google_but_not_finnhub(self) -> None:
-        published_at = "2026-07-30T02:00:00+00:00"
+        published_at = "2026-07-19T02:00:00+00:00"
         mapping = {"1810.HK": {"zh": ["小米"], "en": ["Xiaomi"]}}
         finnhub_item = collection_item(
             title="Xiaomi quarterly result",

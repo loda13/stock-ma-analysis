@@ -262,8 +262,29 @@ def collect_news_enhanced(
         reverse=True
     )
 
+    fresh_cutoff = as_of - pd.Timedelta(days=lookback_days)
+    fallback_cutoff = as_of - pd.Timedelta(days=fallback_days)
+    fresh = [
+        item for item in scored_candidates
+        if fresh_cutoff <= item["published_at"] <= as_of
+    ]
+    fallback = [
+        item for item in scored_candidates
+        if fallback_cutoff <= item["published_at"] < fresh_cutoff
+    ]
+    if fresh:
+        selected_pool, collection_freshness, window_days = fresh, "fresh", lookback_days
+    elif fallback:
+        selected_pool, collection_freshness, window_days = (
+            fallback,
+            "low_freshness",
+            fallback_days,
+        )
+    else:
+        selected_pool, collection_freshness, window_days = [], "insufficient", lookback_days
+
     # Preserve the relevance/quality ordering while removing duplicate stories.
-    selected = _deduplicate_ranked(scored_candidates, max_items)
+    selected = _deduplicate_ranked(selected_pool, max_items)
 
     # Build response
     items = [
@@ -275,7 +296,7 @@ def collect_news_enhanced(
             "url": item["url"],
             "summary": item["summary"],
             "source_provider": item["source_provider"],
-            "freshness": "fresh" if selected else "insufficient",
+            "freshness": collection_freshness,
         }
         for index, item in enumerate(selected, start=1)
     ]
@@ -287,8 +308,8 @@ def collect_news_enhanced(
         "name": name,
         "ticker": ticker,
         "as_of": as_of.isoformat(),
-        "window_days": lookback_days,
-        "freshness": "fresh" if items else "insufficient",
+        "window_days": window_days,
+        "freshness": collection_freshness,
         "items": items,
         "source_errors": list(set(source_errors_all)),
         "queries_used": queries[:3],
