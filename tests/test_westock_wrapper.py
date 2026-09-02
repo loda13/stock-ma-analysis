@@ -363,6 +363,27 @@ class WestockWrapperTests(unittest.TestCase):
         self.assertEqual(result.attrs["adjustment"], "split_only")
         self.assertFalse(download.call_args.kwargs["auto_adjust"])
 
+    def test_fetch_yfinance_flattens_single_ticker_multiindex_columns(self):
+        fields = ["Open", "High", "Low", "Close", "Volume"]
+        for columns in (
+            pd.MultiIndex.from_product([fields, ["1810.HK"]]),
+            pd.MultiIndex.from_product([["1810.HK"], fields]),
+        ):
+            with self.subTest(columns=columns.tolist()):
+                frame = pd.DataFrame(
+                    [[1.0, 2.0, 0.5, 1.5, 100.0]],
+                    columns=columns,
+                    index=pd.to_datetime(["2026-09-02 10:30:00+08:00"]),
+                )
+
+                with patch("yfinance.download", return_value=frame):
+                    result = westock_wrapper.fetch_yfinance(
+                        "1810.HK", period="5d", interval="1h"
+                    )
+
+                self.assertEqual(list(result.columns), fields)
+                self.assertEqual(float(result.iloc[-1]["Volume"]), 100.0)
+
 
 class TencentMinuteKlineTests(unittest.TestCase):
     """Minute bars live on a different endpoint than day/week/month.

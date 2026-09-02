@@ -214,6 +214,7 @@ def fetch_kline(ticker, period='day', limit=500):
 
 def fetch_yfinance(ticker, period='1y', start=None, end=None, interval='1d', progress=False):
     """Fallback to yfinance when westock-data is unavailable or returns no data."""
+    import pandas as pd
     import yfinance as _yf
 
     frame = _yf.download(
@@ -225,6 +226,12 @@ def fetch_yfinance(ticker, period='1y', start=None, end=None, interval='1d', pro
         progress=progress,
         auto_adjust=False,
     )
+    if isinstance(frame.columns, pd.MultiIndex):
+        for level in range(frame.columns.nlevels):
+            labels = frame.columns.get_level_values(level)
+            if {'Open', 'High', 'Low', 'Close', 'Volume'}.issubset(labels):
+                frame.columns = labels
+                break
     # auto_adjust=False keeps Yahoo's own OHLC: restated for splits, but with
     # dividend ex-dates left as real gaps. Not the same basis as Tencent's qfq.
     return _tag_adjustment(frame, 'split_only')

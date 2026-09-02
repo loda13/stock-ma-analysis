@@ -5,6 +5,8 @@ tests/test_dual_evidence_integration.py
 """
 
 import unittest
+from unittest.mock import patch
+
 import pandas as pd
 
 import naked_k_analysis
@@ -13,6 +15,14 @@ import naked_k_planner
 
 class TestDualEvidenceIntegration(unittest.TestCase):
     """测试 dual-evidence 集成到主流程"""
+
+    def setUp(self):
+        patcher = patch(
+            "naked_k_intraday_flow.fetch_intraday_bars",
+            return_value=None,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_build_trade_plan_includes_dual_evidence_fields(self):
         """验证 build_trade_plan 返回的报告包含 dual-evidence 字段"""
