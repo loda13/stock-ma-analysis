@@ -344,7 +344,8 @@ class NakedKSynthesisTests(unittest.TestCase):
         self.assertIsNone(report.target_price)
         self.assertIsNone(report.reward_to_risk)
         self.assertEqual(report.signal_state, "watching")
-        self.assertEqual(report.position_size, "0%-10%")
+        self.assertEqual(report.position_size, "0%（无新仓计划）")
+        self.assertEqual(report.position_size, report.risk_plan["position_size"])
         self.assertEqual(report.risk_plan["direction"], "none")
         self.assertEqual(report.risk_plan["suggested_gross_pct"], 0.0)
         self.assertEqual(report.risk_plan["effective_account_risk_pct"], 0.0)
@@ -1122,6 +1123,7 @@ class NakedKSynthesisTests(unittest.TestCase):
         self.assertLessEqual(report.risk_plan["effective_account_risk_pct"], 0.6)
         self.assertLessEqual(report.risk_plan["max_gross_pct"], 3.0)
         self.assertIn("3.0%", report.position_size)
+        self.assertIn("仅处理已有多头，不新建仓", report.position_size)
 
     def test_account_risk_increase_requires_same_proposition_corroboration_even_without_action_change(self):
         report = self._report(

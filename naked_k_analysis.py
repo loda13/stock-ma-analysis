@@ -877,6 +877,9 @@ def format_report(
         if best_trial is not None
         else "暂无（无满足触发条件标的）"
     )
+    observed_names = ", ".join(
+        item.name for item in ranked if item.action == "观望"
+    ) or "无"
     portfolio_exposure = naked_k_portfolio.evaluate_portfolio_exposure(
         reports,
         config=config.portfolio if config is not None else None,
@@ -885,8 +888,9 @@ def format_report(
         [
             "## 今日结论",
             f"- 最值得试错：{best_trial_text}",
-            f"- 继续观察：{next((item.name for item in ranked if item.action == '观望'), '无')}",
-            f"- 需要回避：{', '.join(item.name for item in ranked if item.action in {'回避', '减仓'}) or '无'}",
+            f"- 继续观察：{observed_names}",
+            f"- 需要减仓：{', '.join(item.name for item in ranked if item.action == '减仓') or '无'}",
+            f"- 需要回避：{', '.join(item.name for item in ranked if item.action == '回避') or '无'}",
             f"- 组合风险：{naked_k_portfolio.format_portfolio_exposure(portfolio_exposure)}",
             "",
             "不构成投资建议；以上仅作交易辅助。",
@@ -1375,6 +1379,7 @@ def run_analysis(
                 )
             daily_by_ticker[ticker] = daily
             intraday_by_ticker[ticker] = intraday
+            naked_k_planner.refresh_report_derivatives(report)
         if llm_config is not None and llm_config.enabled:
             commentary = naked_k_llm.safe_generate_llm_commentary(
                 report.ai_assistant,
@@ -1442,6 +1447,7 @@ def run_analysis(
             audit.warning("portfolio_guard_failed", error_type=type(exc).__name__)
 
         for report in reports:
+            naked_k_planner.refresh_report_derivatives(report)
             combined = report.combined_conclusion or {}
             _log_news_audit(
                 audit,

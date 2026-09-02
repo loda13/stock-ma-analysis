@@ -525,7 +525,7 @@ def _build_candidate(
     if action == "观望":
         target_price = None
         reward_to_risk = None
-        position_size = "0%-10%"
+        position_size = str(risk_plan["position_size"])
         signal_state = "watching"
 
     base_rationale = str(technical_snapshot.get("rationale", ""))
@@ -648,7 +648,7 @@ def _clamp_defensive_residual_exposure(
     else:
         position_size = (
             f"降至{clamped_gross:.1f}%以内"
-            f"（账户风险不高于{clamped_account_risk:g}%）"
+            f"（账户风险不高于{clamped_account_risk:g}%；仅处理已有多头，不新建仓）"
         )
     risk_plan["position_size"] = position_size
     candidate["position_size"] = position_size

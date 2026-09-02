@@ -107,8 +107,15 @@ def build_trader_brief(report: Any) -> dict[str, Any]:
 
     target = _value(report, "target_price")
     reward_to_risk = _value(report, "reward_to_risk")
-    target_text = str(target) if target is not None else "暂无第一目标"
     reward_text = f"{reward_to_risk}R" if reward_to_risk is not None else "暂无"
+    entry_trigger = round(float(_value(report, "entry_trigger", 0.0)), 2)
+    stop_loss = round(float(_value(report, "stop_loss", 0.0)), 2)
+    invalidation_verb = "跌破" if stop_loss < entry_trigger else "突破" if stop_loss > entry_trigger else "触及"
+    continuation_path = (
+        f"路径A：价格触发 {entry_trigger} 后延续，先看 {target}"
+        if target is not None
+        else f"路径A：价格触发 {entry_trigger} 后，等待收盘确认再评估"
+    )
 
     # OHLCV 量价代理分析
     smart_money_text = _format_smart_money_brief(smart_money)
@@ -117,7 +124,7 @@ def build_trader_brief(report: Any) -> dict[str, Any]:
     if timeframe.get("alignment") == "conflict":
         risk_points.append("日线机会与高周期方向冲突")
     if not risk_points:
-        risk_points.append("若触发后不能延续并跌破失效位，说明结构判断失败")
+        risk_points.append(f"若触发后不能延续并{invalidation_verb}失效位，说明结构判断失败")
 
     return {
         "当前市场状态": (
@@ -131,14 +138,14 @@ def build_trader_brief(report: Any) -> dict[str, Any]:
         "量价代理证据": smart_money_text,
         "关键价格区域": f"下方：{support}；上方：{resistance}",
         "可能交易路径": [
-            f"路径A：价格触发 {round(float(_value(report, 'entry_trigger', 0.0)), 2)} 后延续，先看 {target_text}",
-            f"路径B：触发失败或跌破/突破失效位 {round(float(_value(report, 'stop_loss', 0.0)), 2)}，计划作废",
+            continuation_path,
+            f"路径B：触发失败或{invalidation_verb}失效位 {stop_loss}，计划作废",
             "路径C：未触发则继续观察，避免在区间中部追价",
         ],
         "交易计划": (
             f"当前机会：{action}；盈亏比：{reward_text}；"
             f"建议仓位：{_value(report, 'position_size', '暂无')}；"
-            f"失效位置：{round(float(_value(report, 'stop_loss', 0.0)), 2)}；"
+            f"失效位置：{stop_loss}；"
             f"风险等级：{risk_plan.get('risk_level', 'medium')}"
         ),
         "风险点": risk_points,

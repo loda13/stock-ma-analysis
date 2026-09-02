@@ -118,11 +118,11 @@ def build_position_guidance(
     elif action == "小仓试错":
         max_gross_pct = 15.0
     elif action == "减仓":
-        return "降至10%以内"
+        return "降至10%以内（仅处理已有多头，不新建仓）"
     elif action == "回避":
         return "不建仓"
     else:
-        return "0%-10%"
+        return "0%（无新仓计划）"
 
     if entry_trigger <= 0:
         return f"最高约{max_gross_pct:.1f}%仓位"

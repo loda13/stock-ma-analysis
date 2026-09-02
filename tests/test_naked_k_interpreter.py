@@ -86,6 +86,54 @@ class NakedKInterpreterTests(unittest.TestCase):
         self.assertNotIn("胜率", brief["交易计划"])
         self.assertNotIn("68%", brief["交易计划"])
 
+    def test_long_plan_uses_downside_invalidation_wording(self):
+        report = SimpleNamespace(
+            action="小仓试错",
+            entry_trigger=105.0,
+            stop_loss=99.0,
+            target_price=117.0,
+            reward_to_risk=2.0,
+            position_size="最高约10.0%仓位",
+        )
+
+        brief = naked_k_interpreter.build_trader_brief(report)
+
+        self.assertIn("跌破失效位 99.0", brief["可能交易路径"][1])
+        self.assertNotIn("跌破/突破", brief["可能交易路径"][1])
+        self.assertIn("跌破失效位", brief["风险点"][0])
+
+    def test_defensive_plan_uses_upside_invalidation_without_fake_target(self):
+        report = SimpleNamespace(
+            action="回避",
+            entry_trigger=105.0,
+            stop_loss=110.0,
+            target_price=None,
+            reward_to_risk=None,
+            position_size="不建仓",
+        )
+
+        brief = naked_k_interpreter.build_trader_brief(report)
+
+        self.assertIn("突破失效位 110.0", brief["可能交易路径"][1])
+        self.assertIn("等待收盘确认再评估", brief["可能交易路径"][0])
+        self.assertNotIn("暂无第一目标", brief["可能交易路径"][0])
+        self.assertIn("突破失效位", brief["风险点"][0])
+
+    def test_equal_trigger_and_stop_uses_touch_invalidation_wording(self):
+        report = SimpleNamespace(
+            action="观望",
+            entry_trigger=105.0,
+            stop_loss=105.0,
+            target_price=None,
+            reward_to_risk=None,
+            position_size="0%（无新仓计划）",
+        )
+
+        brief = naked_k_interpreter.build_trader_brief(report)
+
+        self.assertIn("触及失效位 105.0", brief["可能交易路径"][1])
+        self.assertIn("触及失效位", brief["风险点"][0])
+
     def test_formatter_accepts_legacy_smart_money_brief_key(self):
         text = naked_k_interpreter.format_trader_brief({"主力行为研判": "旧版量价摘要"})
 

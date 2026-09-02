@@ -441,6 +441,7 @@ class NakedKAnalysisTests(unittest.TestCase):
         self.assertIn("news_config", inspect.signature(naked_k_analysis.run_analysis).parameters)
         technical = self._integration_report()
         request_bodies = []
+        legacy_request_bodies = []
 
         def news_post(url, headers, json, timeout):
             del url, headers, timeout
@@ -455,6 +456,12 @@ class NakedKAnalysisTests(unittest.TestCase):
             api_key="fake-legacy-secret",
             model="legacy-model",
         )
+
+        def legacy_post(url, headers, json, timeout):
+            del url, headers, timeout
+            legacy_request_bodies.append(copy.deepcopy(json))
+            return LegacyResponse()
+
         with TemporaryDirectory() as tmpdir:
             journal_path = Path(tmpdir) / "journal.jsonl"
             with (
@@ -466,7 +473,7 @@ class NakedKAnalysisTests(unittest.TestCase):
                     [("测试", "TEST")],
                     journal_path,
                     llm_config=legacy_config,
-                    llm_post=lambda *_args, **_kwargs: LegacyResponse(),
+                    llm_post=legacy_post,
                     news_config=self._news_config(),
                     news_post=news_post,
                     news_lookback_days=7,
@@ -483,11 +490,21 @@ class NakedKAnalysisTests(unittest.TestCase):
         self.assertIsNot(report.technical_conclusion, report.news_analysis)
         self.assertIsNot(report.news_analysis, report.combined_conclusion)
         self.assertEqual(report.action, "买入")
+        legacy_input = json.loads(legacy_request_bodies[0]["messages"][1]["content"])
+        self.assertEqual(legacy_input["engine_plan"]["action"], report.action)
         self.assertEqual(report.action, report.combined_conclusion["final_action"])
         self.assertEqual(report.combined_conclusion["model_action"], "买入")
         self.assertNotEqual(report.entry_trigger, report.technical_conclusion["entry_trigger"])
         self.assertNotEqual(report.stop_loss, report.technical_conclusion["stop_loss"])
         self.assertEqual(report.combined_conclusion["price_plan_source"], "deterministic_naked_k")
+        self.assertIn(
+            f"当前机会：{report.action}",
+            report.trader_brief.get("交易计划", ""),
+        )
+        self.assertEqual(
+            report.ai_assistant.get("engine_plan", {}).get("action"),
+            report.action,
+        )
         self.assertEqual(
             report.ai_assistant["llm_commentary"]["parsed"]["market_reading"],
             "独立复盘",
@@ -496,6 +513,8 @@ class NakedKAnalysisTests(unittest.TestCase):
         self.assertEqual(journal_row["technical_conclusion"], report.technical_conclusion)
         self.assertEqual(journal_row["news_analysis"], report.news_analysis)
         self.assertEqual(journal_row["combined_conclusion"], report.combined_conclusion)
+        self.assertEqual(journal_row["trader_brief"], report.trader_brief)
+        self.assertEqual(journal_row["ai_assistant"], report.ai_assistant)
         json.dumps(asdict(report), ensure_ascii=False)
         self.assertIn("### 技术面结论", markdown)
 
@@ -1371,6 +1390,10 @@ class NakedKAnalysisTests(unittest.TestCase):
         self.assertEqual(reports[0].action, "观望")
         self.assertEqual(row["action"], "观望")
         self.assertEqual(row["combined_conclusion"]["final_action"], "观望")
+        self.assertIn("当前机会：观望", reports[0].trader_brief["交易计划"])
+        self.assertEqual(reports[0].ai_assistant["engine_plan"]["action"], "观望")
+        self.assertEqual(row["trader_brief"], reports[0].trader_brief)
+        self.assertEqual(row["ai_assistant"], reports[0].ai_assistant)
 
     def test_news_bootstrap_fallback_skips_collection_and_model_but_emits_all_events(self):
         with TemporaryDirectory() as tmpdir:
@@ -2226,6 +2249,15 @@ class NakedKAnalysisTests(unittest.TestCase):
         self.assertIn("最高约10.5%", guidance)
         self.assertIn("按1%账户风险", guidance)
 
+    def test_reduce_position_guidance_is_not_a_new_position(self):
+        guidance = naked_k_analysis.build_position_guidance(
+            action="减仓",
+            entry_trigger=100.0,
+            stop_loss=110.0,
+        )
+
+        self.assertIn("仅处理已有多头，不新建仓", guidance)
+
     def test_bullish_trade_plan_includes_target_and_reward_to_risk(self):
         daily = pd.DataFrame(
             {
@@ -2266,7 +2298,8 @@ class NakedKAnalysisTests(unittest.TestCase):
         self.assertEqual(report.signal_state, "watching")
         self.assertIsNone(report.target_price)
         self.assertIsNone(report.reward_to_risk)
-        self.assertEqual(report.position_size, "0%-10%")
+        self.assertEqual(report.position_size, "0%（无新仓计划）")
+        self.assertEqual(report.position_size, report.risk_plan["position_size"])
         self.assertIn("盈亏比不足", report.rationale)
 
     def test_intraday_status_marks_confirmed_breakout(self):
@@ -2500,6 +2533,35 @@ class NakedKAnalysisTests(unittest.TestCase):
         text = naked_k_analysis.format_report("2026-06-29 16:00:00 CST", [report], naked_k_analysis.DEFAULT_JOURNAL_PATH)
 
         self.assertIn("- 最值得试错：暂无（无满足触发条件标的）", text)
+
+    def test_format_report_lists_all_observation_candidates(self):
+        reports = [self._integration_report("AAA"), self._integration_report("BBB")]
+
+        text = naked_k_analysis.format_report(
+            "2026-09-01 16:00:00 CST",
+            reports,
+            naked_k_analysis.DEFAULT_JOURNAL_PATH,
+        )
+
+        today = text.split("## 今日结论", 1)[1]
+        self.assertIn("继续观察：公司-AAA, 公司-BBB", today)
+
+    def test_format_report_separates_reduce_and_avoid_actions(self):
+        reports = [
+            self._integration_report("REDUCE", action="减仓"),
+            self._integration_report("AVOID", action="回避"),
+        ]
+
+        text = naked_k_analysis.format_report(
+            "2026-09-02 16:00:00 CST",
+            reports,
+            naked_k_analysis.DEFAULT_JOURNAL_PATH,
+        )
+
+        today = text.split("## 今日结论", 1)[1]
+        self.assertIn("需要减仓：公司-REDUCE", today)
+        self.assertIn("需要回避：公司-AVOID", today)
+        self.assertNotIn("需要回避：公司-REDUCE", today)
 
     def test_format_report_includes_portfolio_exposure_summary(self):
         report = naked_k_analysis.InstrumentReport(

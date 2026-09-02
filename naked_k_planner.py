@@ -68,6 +68,14 @@ class InstrumentReport:
     combined_conclusion: dict[str, Any] = field(default_factory=dict)
 
 
+def refresh_report_derivatives(report: InstrumentReport) -> None:
+    llm_commentary = report.ai_assistant.get("llm_commentary")
+    report.trader_brief = naked_k_interpreter.build_trader_brief(report)
+    report.ai_assistant = naked_k_ai.build_ai_trading_assistant(report)
+    if llm_commentary is not None:
+        report.ai_assistant["llm_commentary"] = llm_commentary
+
+
 def build_trade_plan(
     name: str,
     ticker: str,
@@ -388,8 +396,7 @@ def build_trade_plan(
         price_evidences=price_evidences_list,
         trade_flow_evidences=trade_flow_evidences_list,
     )
-    report.trader_brief = naked_k_interpreter.build_trader_brief(report)
-    report.ai_assistant = naked_k_ai.build_ai_trading_assistant(report)
+    refresh_report_derivatives(report)
     return report
 
 
