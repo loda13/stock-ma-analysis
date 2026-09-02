@@ -8,6 +8,9 @@ remain the detailed implementation archive.
 - Require one or more explicit ticker arguments for every CLI run.
 - Remove ad-hoc ticker runners and deprecated, production-unreachable trade-flow modules.
 - Consolidate project documentation and keep generated reports outside the maintained tree.
+- Enforce the requested news lookback after provider merging, with an explicit low-freshness fallback.
+- Keep final actions, trader briefs, AI payloads, position guidance, and daily summaries semantically aligned.
+- Normalize yfinance single-ticker MultiIndex data before downstream OHLCV analysis.
 
 ## v3.5.1 — 2026-08-19
 
