@@ -310,9 +310,11 @@ def format_report(run_date: str, reports: list[InstrumentReport], journal_path: 
                   config: naked_k_config.TradingConfig | None = None,
                   adjustment_conflicts: dict | None = None) -> str:
     lines = ['# 日线波段技术趋势报告', f'生成日期：{run_date}', f'日志：{journal_path}',
-             '周期：数周至数月；规则版本 technical-trend-v1；经济有效性 UNVALIDATED。', '']
+             f'周期：数周至数月；规则版本 {naked_k_trend.RULE_VERSION}；经济有效性 UNVALIDATED。', '']
     directions = {'up': '上涨', 'down': '下跌', 'transition': '过渡', 'unknown': '数据不足'}
     strengths = {'strong': '强', 'developing': '发展中', 'weak': '弱', 'unknown': '不可计算'}
+    modes = {'short': '短历史模式：EMA20/50；长期趋势未确认',
+             'full': '完整历史模式：EMA50/200', 'insufficient': '样本不足，暂停趋势定向和新仓计划'}
     for report in reports:
         trend, ind = report.trend, report.trend['indicators']
         warning = format_adjustment_warning((adjustment_conflicts or {}).get(report.ticker))
@@ -320,14 +322,18 @@ def format_report(run_date: str, reports: list[InstrumentReport], journal_path: 
                   '- 数据源：' + '；'.join(f'{k} `{v}`' for k, v in report.data_sources.items()),
                   *([warning] if warning else []),
                   f"- 最新K线：日线 {report.latest_k_dates['daily']} 收 {_display(trend['close'])}",
+                  f"- 评估依据：{modes[trend['history_mode']]}；完整日K {trend['daily_rows']} 根",
                   f"- 趋势：{directions[trend['direction']]}；ADX强度：{strengths[trend['strength']]}",
                   f'- 当前计划：{report.action}；状态：{report.signal_state}',
                   f"- EMA20 / EMA50 / EMA200：{_display(ind.get('ema20'))} / {_display(ind.get('ema50'))} / {_display(ind.get('ema200'))}",
                   f"- EMA50近5日变化：{_display(ind.get('ema50_slope'))}；ADX14：{_display(ind.get('adx'))}（强度不代表方向）",
                   f"- ATR14：{_display(ind.get('atr'))}；ATR%：{_display(ind.get('atr_pct'))}%",
                   f"- 前20日高 / 低：{_display(ind.get('channel_high'))} / {_display(ind.get('channel_low'))}；首次收盘突破：{'是' if trend['breakout'] else '否'}",
-                  f"- 相对成交量：{_display(ind.get('relative_volume'))}倍（相对之前20日；只作辅助）",
-                  f'- 结构支撑 / 压力：{_display(report.support)} / {_display(report.resistance)}']
+                  f"- 相对成交量：{_display(ind.get('relative_volume'))}倍（相对之前20日；只作辅助）"]
+        for key, label in [('nearest_support', '支撑'), ('nearest_resistance', '压力')]:
+            zone = trend['zones'].get(key)
+            bounds = f"{_display(zone['lower'])}–{_display(zone['upper'])}" if zone else '未识别'
+            lines.append(f'- 结构{label}区间：{bounds}')
         vwap = trend['zones'].get('anchored_vwap')
         if vwap:
             lines.append(f"- 锚定VWAP：{_display(vwap['value'])}；锚点 {vwap['anchor_date']}，确认于 {vwap['confirmed_at']}（HLC3成交量近似）")
@@ -398,7 +404,7 @@ def run_analysis(tickers: list[tuple[str, str]], journal_path: Path,
     if clock.tzinfo is None:
         clock = clock.tz_localize('Asia/Shanghai')
     run_date = clock.isoformat()
-    audit.info('run_started', ticker_count=len(tickers), schema_version='technical-trend-v1')
+    audit.info('run_started', ticker_count=len(tickers), schema_version=naked_k_trend.RULE_VERSION)
     for (name, _), ticker in zip(tickers, symbols):
         try:
             daily = trim_to_closed_bars(load_ohlcv(ticker, '1d', '3y'), classify_market(ticker), '1d', now=clock)
@@ -419,7 +425,9 @@ def run_analysis(tickers: list[tuple[str, str]], journal_path: Path,
             if daily.attrs.get('adjustment', 'unknown') == 'unknown':
                 warnings.append('行情复权口径未知，实盘价格需核对')
             if report.trend['status'] != 'ready':
-                warnings.append('不足205根完整日K，暂停完整趋势定向和新仓计划')
+                warnings.append(f'不足{naked_k_trend.MIN_HISTORY}根完整日K，暂停趋势定向和新仓计划')
+            elif report.trend['history_mode'] == 'short':
+                warnings.append('短历史规则未经经济验证；长期趋势未确认')
             deadline = _next_possible_open(report.latest_k_dates['daily'], classify_market(ticker))
             if report.signal_state == 'planned_long' and clock >= deadline:
                 warnings.append('候选开盘窗口已过或交易日历未核实，暂停沿用旧信号；需核对节假日和下一有效交易时点')
@@ -454,9 +462,11 @@ def run_analysis(tickers: list[tuple[str, str]], journal_path: Path,
     for report in reports:
         append_journal(journal_path, run_date, report)
         audit.info('plan_generated', ticker=report.ticker, action=report.action,
-                   signal_state=report.signal_state, account_status=report.account['status'])
+                   signal_state=report.signal_state, account_status=report.account['status'],
+                   rule_version=naked_k_trend.RULE_VERSION, history_mode=report.trend['history_mode'],
+                   daily_rows=report.trend['daily_rows'], direction_basis=report.trend['direction_basis'])
     text = format_report(run_date, reports, journal_path, config, conflicts)
-    audit.info('run_completed', ticker_count=len(reports), schema_version='technical-trend-v1')
+    audit.info('run_completed', ticker_count=len(reports), schema_version=naked_k_trend.RULE_VERSION)
     return text, reports
 
 
@@ -491,7 +501,7 @@ def main() -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding='utf-8')
         if args.json:
-            print(json.dumps({'schema_version': 'technical-trend-v1', 'report': text,
+            print(json.dumps({'schema_version': naked_k_trend.RULE_VERSION, 'report': text,
                               'items': [serialize_report(r) for r in reports],
                               'report_path': str(path), 'audit_path': args.audit_path or None},
                              ensure_ascii=False, indent=2, allow_nan=False))

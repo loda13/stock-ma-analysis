@@ -13,13 +13,12 @@ import pandas as pd
 
 from naked_k_config import TradingConfig, load_trading_config
 from naked_k_risk import build_risk_plan
-from naked_k_trend import analyze_trend, evaluate_entry, indicator_frame
+from naked_k_trend import MIN_HISTORY, RULE_VERSION, analyze_trend, evaluate_entry, indicator_frame
 from naked_k_zones import validate_ohlcv
 
 
 SignalBuilder = Callable[[pd.DataFrame], dict[str, Any]]
 SCHEMA_VERSION = "1.0"
-RULE_VERSION = "technical-trend-v1"
 
 
 def _date(value: Any) -> str:
@@ -47,8 +46,8 @@ def build_walk_forward_windows(frame: pd.DataFrame, train_size: int, test_size: 
                                step: int | None = None) -> list[dict[str, Any]]:
     if type(train_size) is not int or type(test_size) is not int or (step is not None and type(step) is not int):
         raise ValueError("train_size, test_size, and step must be integers")
-    if train_size < 205 or test_size <= 0:
-        raise ValueError("train_size must be at least 205 and test_size must be positive")
+    if train_size < MIN_HISTORY or test_size <= 0:
+        raise ValueError(f"train_size must be at least {MIN_HISTORY} and test_size must be positive")
     stride = test_size if step is None else step
     if stride < test_size:
         raise ValueError("step must be at least test_size so test windows do not overlap")
@@ -107,6 +106,12 @@ def _comparison(frame: pd.DataFrame, start_pos: int, commission: float, slip: fl
     cap = _allocation_cap(config) / 100
     cash, units, values = initial_equity, 0.0, [initial_equity]
     indicators = indicator_frame(frame) if ema else None
+    if ema and (start_pos >= len(indicators) or pd.isna(indicators.iloc[start_pos][["ema50", "ema200"]]).any()):
+        return {"name": "ema50_200_long_cash", "status": "not_computable", "allocation_pct": cap * 100,
+                "period_start": _date(frame.index[start_pos + 1]) if start_pos + 1 < len(frame) else None,
+                "period_end": _date(frame.index[-1]), "cost_adjusted": True, "metrics": None, "equity": [],
+                "terminal_position_open": False, "boundary_liquidation_fee_applied": False,
+                "reason": "EMA200 unavailable at the initial evaluation signal"}
     for i in range(start_pos + 1, len(frame)):
         row = frame.iloc[i]
         prior = indicators.iloc[i - 1] if indicators is not None else None
@@ -124,17 +129,18 @@ def _comparison(frame: pd.DataFrame, start_pos: int, commission: float, slip: fl
         values.append(cash + units * row.Close)
     label = "ema50_200_long_cash" if ema else "buy_hold"
     metrics = calculate_performance_metrics([], values)
-    return {"name": label, "allocation_pct": cap * 100, "period_start": _date(frame.index[start_pos + 1]) if start_pos + 1 < len(frame) else None,
+    return {"name": label, "status": "completed", "allocation_pct": cap * 100, "period_start": _date(frame.index[start_pos + 1]) if start_pos + 1 < len(frame) else None,
             "period_end": _date(frame.index[-1]), "cost_adjusted": True, "metrics": metrics,
             "equity": values, "terminal_position_open": bool(units),
             "boundary_liquidation_fee_applied": False}
 
 
 def _metadata(frame: pd.DataFrame, config: TradingConfig, commission_bps: float,
-              slippage_bps: float, initial_equity: float, evaluation_start: str | None) -> dict[str, Any]:
+              slippage_bps: float, initial_equity: float, evaluation_start: str | None,
+              minimum_history: int) -> dict[str, Any]:
     return {"schema_version": SCHEMA_VERSION, "rule_version": RULE_VERSION,
             "commission_bps": float(commission_bps), "slippage_bps": float(slippage_bps),
-            "config": asdict(config), "initial_equity": float(initial_equity),
+            "config": asdict(config), "initial_equity": float(initial_equity), "minimum_history": minimum_history,
             "sample_start": _date(frame.index[0]) if len(frame) else None,
             "sample_end": _date(frame.index[-1]) if len(frame) else None,
             "evaluation_start": evaluation_start, "evaluation_end": _date(frame.index[-1]) if evaluation_start else None,
@@ -148,16 +154,16 @@ def _actionable(signal: dict[str, Any]) -> bool:
 
 
 def run_event_backtest(name: str, ticker: str, daily: pd.DataFrame, *, commission_bps: float,
-                       slippage_bps: float, config: TradingConfig | None = None, min_history: int = 205,
+                       slippage_bps: float, config: TradingConfig | None = None, min_history: int = MIN_HISTORY,
                        signal_builder: SignalBuilder | None = None, initial_equity: float = 100000.0) -> dict[str, Any]:
     commission, slip = _cost(commission_bps, "commission_bps"), _cost(slippage_bps, "slippage_bps")
     if type(min_history) is not int or min_history < 2 or isinstance(initial_equity, bool) or not isinstance(initial_equity, (int, float)) or initial_equity <= 0 or not math.isfinite(initial_equity):
         raise ValueError("min_history must be at least 2 and initial_equity must be finite and positive")
     frame, config, builder = _clean(daily), config or TradingConfig(), signal_builder or analyze_trend
-    if signal_builder is None and min_history < 205:
-        raise ValueError("the production trend strategy requires min_history >= 205")
+    if signal_builder is None and min_history < MIN_HISTORY:
+        raise ValueError(f"the production trend strategy requires min_history >= {MIN_HISTORY}")
     evaluation_start = _date(frame.index[min_history]) if len(frame) > min_history else None
-    metadata = _metadata(frame, config, commission_bps, slippage_bps, initial_equity, evaluation_start)
+    metadata = _metadata(frame, config, commission_bps, slippage_bps, initial_equity, evaluation_start, min_history)
     if len(frame) <= min_history:
         return {"name": name, "ticker": ticker, "status": "insufficient_history", "trades": [], "open_position": None,
                 "equity_curve": [], "metrics": None, "comparisons": {}, "metadata": metadata,
@@ -166,12 +172,15 @@ def run_event_backtest(name: str, ticker: str, daily: pd.DataFrame, *, commissio
                 "audit": {"no_lookahead": True, "entries": 0, "rejected_entries": [], "cost_label": "gross research" if not commission and not slip else "cost adjusted"}}
 
     cash, position, pending_entry, pending_exit = initial_equity, None, None, False
-    trades, rejected, curve = [], [], []
+    trades, rejected, curve, mode_transitions = [], [], [], []
     peak, consecutive_losses = initial_equity, 0
     first = min_history - 1
     curve.append({"date": _date(frame.index[first]), "equity": initial_equity, "daily_return": None,
                   "gross_exposure_pct": 0.0})
     signal = builder(frame.iloc[:first + 1].copy())
+    if signal.get("history_mode"):
+        mode_transitions.append({key: signal.get(key) for key in
+            ("daily_rows", "history_mode", "direction_basis", "rule_version")})
     if _actionable(signal):
         pending_entry = signal
 
@@ -239,6 +248,9 @@ def run_event_backtest(name: str, ticker: str, daily: pd.DataFrame, *, commissio
                       "gross_exposure_pct": exposure})
         peak = max(peak, equity)
         signal = builder(frame.iloc[:i + 1].copy())
+        if signal.get("history_mode") and (not mode_transitions or signal.get("history_mode") != mode_transitions[-1]["history_mode"]):
+            mode_transitions.append({key: signal.get(key) for key in
+                ("daily_rows", "history_mode", "direction_basis", "rule_version")})
         if position:
             new_stop = signal.get("stop_loss")
             if isinstance(new_stop, (int, float)) and math.isfinite(new_stop) and position["stop"] < new_stop < row.Close:
@@ -257,7 +269,7 @@ def run_event_backtest(name: str, ticker: str, daily: pd.DataFrame, *, commissio
             "external_benchmark": {"return_pct": None, "excess_return_pct": None},
             "audit": {"no_lookahead": True, "entries": len(trades) + bool(position), "rejected_entries": rejected,
                       "evaluated_from": _date(frame.index[first]), "cost_label": "gross research" if not commission and not slip else "cost adjusted",
-                      "fractional_units": True}}
+                      "fractional_units": True, "signal_mode_transitions": mode_transitions}}
 
 
 def run_walk_forward_event_backtest(name: str, ticker: str, daily: pd.DataFrame, train_size: int,
@@ -293,19 +305,25 @@ def run_walk_forward_event_backtest(name: str, ticker: str, daily: pd.DataFrame,
     comparisons = {}
     for key in ("buy_hold", "ema50_200"):
         aggregate = [100000.0]
+        unavailable = next((result["comparisons"][key] for result in results
+                            if result["comparisons"][key]["status"] != "completed"), None)
+        if unavailable:
+            comparisons[key] = {**unavailable, "period_start": _date(windows[0]["test_start"]),
+                "period_end": _date(windows[-1]["test_end"]), "reset_policy": "reset_each_test_window"}
+            continue
         for result in results:
             window_values = result["comparisons"][key]["equity"]
             for daily_return in _daily_returns(window_values):
                 aggregate.append(aggregate[-1] * (1 + daily_return))
         if windows:
             sample = results[0]["comparisons"][key]
-            comparisons[key] = {"name": sample["name"], "allocation_pct": sample["allocation_pct"],
+            comparisons[key] = {"name": sample["name"], "status": "completed", "allocation_pct": sample["allocation_pct"],
                 "period_start": _date(windows[0]["test_start"]), "period_end": _date(windows[-1]["test_end"]),
                 "cost_adjusted": True, "metrics": calculate_performance_metrics([], aggregate), "equity": aggregate,
                 "terminal_position_open": any(result["comparisons"][key]["terminal_position_open"] for result in results),
                 "reset_policy": "reset_each_test_window", "boundary_liquidation_fee_applied": False}
     evaluation_start = _date(windows[0]["test_start"]) if windows else None
-    metadata = _metadata(frame, active_config, commission_bps, slippage_bps, 100000.0, evaluation_start)
+    metadata = _metadata(frame, active_config, commission_bps, slippage_bps, 100000.0, evaluation_start, train_size)
     metadata["evaluation_end"] = _date(windows[-1]["test_end"]) if windows else None
     return {"status": "completed" if windows else "insufficient_history", "windows": results,
             "trades": trades, "equity_curve": stitched,

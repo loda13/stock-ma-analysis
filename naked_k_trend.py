@@ -5,6 +5,10 @@ import numpy as np
 import pandas as pd
 from naked_k_zones import detect_price_zones, validate_ohlcv
 
+MIN_HISTORY = 55
+FULL_HISTORY = 205
+RULE_VERSION = 'technical-trend-v2'
+
 
 def _validated(frame: pd.DataFrame) -> pd.DataFrame:
     return validate_ohlcv(frame)
@@ -61,11 +65,13 @@ def analyze_trend(frame: pd.DataFrame) -> dict[str, Any]:
     data = indicator_frame(frame)
     if data.empty:
         raise ValueError("OHLCV must contain at least one row")
-    row, ready = data.iloc[-1], len(data) >= 205
+    row, ready = data.iloc[-1], len(data) >= MIN_HISTORY
+    mode = 'full' if len(data) >= FULL_HISTORY else 'short' if ready else 'insufficient'
     close, ema50, ema200, slope = map(_number, [row.Close, row.ema50, row.ema200, row.ema50_slope])
     direction = "unknown"
     if ready:
-        direction = "up" if close > ema50 > ema200 and slope > 0 else "down" if close < ema50 < ema200 and slope < 0 else "transition"
+        fast, slow = (_number(row.ema20), ema50) if mode == 'short' else (ema50, ema200)
+        direction = "up" if close > fast > slow and slope > 0 else "down" if close < fast < slow and slope < 0 else "transition"
     adx = _number(row.adx)
     strength = "unknown" if adx is None else "strong" if adx >= 25 else "developing" if adx >= 20 else "weak"
     prior_high = _number(row.channel_high)
@@ -87,6 +93,8 @@ def analyze_trend(frame: pd.DataFrame) -> dict[str, Any]:
         reasons.append("resistance_within_1r")
     keys = ["ema20", "ema50", "ema200", "atr", "atr_pct", "adx", "channel_high", "channel_low", "relative_volume", "ema50_slope"]
     return {"status": "ready" if ready else "insufficient_history", "direction": direction, "strength": strength,
+            "history_mode": mode, "daily_rows": len(data), "rule_version": RULE_VERSION,
+            "direction_basis": {'full': 'ema50_200', 'short': 'ema20_50', 'insufficient': 'unavailable'}[mode],
             "as_of": pd.Timestamp(data.index[-1]).isoformat(), "close": close,
             "indicators": {key: _number(row[key]) for key in keys}, "zones": zones, "breakout": breakout,
             "entry_candidate": candidate, "exit_signal": bool(ready and (close < ema50 or direction == "down")),

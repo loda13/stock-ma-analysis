@@ -23,7 +23,7 @@ class PlannerTests(unittest.TestCase):
     def test_unknown_account_is_explicit_and_signal_is_only_a_plan(self):
         with patch.object(p.naked_k_trend, 'analyze_trend', return_value=signal()):
             report = p.build_trade_plan('TEST', 'TEST', frame())
-        self.assertEqual(report.schema_version, 'technical-trend-v1')
+        self.assertEqual(report.schema_version, 'technical-trend-v2')
         self.assertEqual(report.signal_state, 'planned_long')
         self.assertEqual(report.account['status'], 'unknown')
         self.assertEqual(report.management['holding_status'], 'unknown')

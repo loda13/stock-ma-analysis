@@ -35,7 +35,7 @@ class InstrumentReport:
     latest_k_dates: dict[str, str]
     latest_closes: dict[str, float]
     review: dict[str, Any]
-    schema_version: str = 'technical-trend-v1'
+    schema_version: str = naked_k_trend.RULE_VERSION
     news: dict[str, Any] = field(default_factory=dict)
     data_quality: dict[str, Any] = field(default_factory=dict)
 

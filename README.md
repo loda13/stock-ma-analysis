@@ -40,19 +40,21 @@ python naked_k_analysis.py 0700.HK --news
 python -m unittest discover -v
 ```
 
-必须显式提供ticker，不内置股票池。行情依次降级：westock-data CLI、腾讯K线、Yahoo chart JSON、yfinance。默认请求3年日K和可选5年周K；周线只显示数据背景和复权检查，不重复参与交易投票。实际日线不足205根时不生成完整趋势方向或新仓计划。
+必须显式提供ticker，不内置股票池。行情依次降级：westock-data CLI、腾讯K线、Yahoo chart JSON、yfinance。默认请求3年日K和可选5年周K；周线只显示数据背景和复权检查，不重复参与交易投票。55–204根完整日K自动使用短历史模式，支持DRAM、FOTO等新上市标的；不足55根时不生成趋势方向或新仓计划。
 
 `--news-lookback-days 7 --news-max-items 12` 控制事实附录，窗口外和未来消息按采集层规则过滤。标题未逐条核验正文，不等于事件已经被确认。
 
-输出：`reports/naked_k_latest.md`、`reports/naked_k_journal.jsonl`、`reports/naked_k_audit.jsonl`。JSON及日志schema为 `technical-trend-v1`。日志追加新记录；旧记录保留原样，不自动换算为新规则的历史信号。
+输出：`reports/naked_k_latest.md`、`reports/naked_k_journal.jsonl`、`reports/naked_k_audit.jsonl`。JSON及日志schema为 `technical-trend-v2`，趋势结果包含 `history_mode`、`daily_rows`、`direction_basis` 和 `rule_version`。日志追加新记录；旧记录保留原样，不自动换算为新规则的历史信号。
 
-## 冻结的首版规则
+## 当前规则
 
-1. 上涨：收盘 > EMA50 > EMA200，EMA50比5个交易日前高；下跌为相反关系；其余为过渡。ADX低于20显示弱、20到25为发展中、25及以上为强，仅是描述性惯例。
+1. 完整历史模式（至少205根）：上涨为收盘 > EMA50 > EMA200，EMA50比5个交易日前高。短历史模式（55–204根）：上涨为收盘 > EMA20 > EMA50，EMA50比5个交易日前高；明确标注“长期趋势未确认”。两种模式下跌均为相反关系，其余为过渡。ADX低于20显示弱、20到25为发展中、25及以上为强，仅是描述性惯例。
 2. 只有上涨趋势下首次收盘突破**之前20根日K**最高价才产生候选；持续突破不反复产生新仓。EMA采用首N根收盘均值初始化；ATR/ADX采用Wilder平滑。
 3. 仅紧接信号日的下一交易日开盘有效，盘中不追补。最高入场价为 `min(信号收盘 + 0.5 ATR, EMA20 + 2 ATR)`。信号收盘已经过度偏离也不生成候选。实际入场须重新检查止损距离和首个压力区下沿是否至少有1R空间。未接入节假日日历，普通工作日开盘时点之后会保守暂停旧候选，需核对下一有效交易日。
 4. 初始止损为前20日最低价减0.5ATR；后续结构移动止损只收紧。收盘跌破EMA50，已有多头下一交易日开盘退出。没有固定预测目标价，不做空。
 5. 计划仓位由风险预算和止损距离计算，再受单标的、市场和组合容量约束；候选按用户输入顺序分配预算。没有账户数据时这些都是假设预算，不是执行许可或真实账户暴露。
+
+55根是EMA50初始化加5日斜率所需的最小样本，不代表收益可靠性。EMA200不足200根时显示不可计算；200–204根即使已有数值，也仍使用短历史规则。模式按每个信号时点可见历史选择，达到205根时切换完整规则。短历史模式同样须满足全部入场和风控约束，不保证产生买入候选。
 
 参数是预先冻结的研究规则，不是经优化得到的最优配置。ADX、成交量和VWAP不参与多项投票或概率计算；以后只有证明存在增量价值才增加过滤器。
 
@@ -70,9 +72,13 @@ python naked_k_analysis.py 0700.HK --config-path config.example.json --account-p
 
 止损只是计划，跳空、流动性与交易所限制可能造成更大实际损失。账户风险字段依赖输入质量；百分比预算不自动转换为各市场整手订单。
 
+## 短历史规则迁移
+
+`technical-trend-v2`增加短历史模式；至少205根时保留v1完整趋势算法。调用方应读取模式及规则版本，不把v1与v2日志拼接成同一规则业绩；所有旧报告和日志保留。支撑、压力在Markdown中展示完整区间。
+
 ## 从 v3.x 迁移到 v4.0.0
 
-- 本次为不兼容升级：报告结构与信号规则已替换。调用方应读取 `technical-trend-v1` schema，不能把v3历史信号拼接成同一策略业绩。
+- v4.0.0为不兼容升级：报告结构与信号规则已替换，当时引入 `technical-trend-v1` schema；当前使用v2，不能把v3历史信号拼接成同一策略业绩。
 - `--llm`、`--llm-base-url`、`--llm-model`、`--news-model` 已删除，使用时明确报错。`--news` 改为事实附录。
 - 旧配置的 `smart_money` 字段不再接受，按 `config.example.json` 迁移。旧输出中的AI/资金流/综合动作字段不再生成。
 - MACD、RSI、KDJ、布林带未加入；当前组合已经分别描述方向、强度和波动，避免重复证据。
@@ -89,8 +95,10 @@ v4.0.0发布前，260项离线测试及独立代码审查通过。覆盖指标�
 python naked_k_backtest.py 0700.HK --csv daily.csv --commission-bps 10 --slippage-bps 10 --output reports/backtest.json
 ```
 
-CSV列为 `Date,Open,High,Low,Close,Volume`，按日期升序，至少206行才能评估第一个执行日。费用与滑点单位均为单边基点（10基点=0.1%），上述数值仅为命令示例；可选 `--benchmark-csv` 接收 `Date,Close` 基准，缺失则超额收益为null。比较策略采用相同仓位上限，但不采用主策略的结构止损和账户风险过滤，收益差异不能直接当作等风险超额收益。
+CSV列为 `Date,Open,High,Low,Close,Volume`，按日期升序，默认至少56行才能评估第一个执行日（55根预热，次日开盘）。费用与滑点单位均为单边基点（10基点=0.1%），上述数值仅为命令示例；可选 `--benchmark-csv` 接收 `Date,Close` 基准，缺失则超额收益为null。比较策略采用相同仓位上限，但不采用主策略的结构止损和账户风险过滤，收益差异不能直接当作等风险超额收益。
 
-`run_walk_forward_event_backtest(..., train_size=205, test_size=63, commission_bps=10, slippage_bps=10)` 提供冻结参数的非重叠测试窗口。训练段只作指标预热，不优化参数；窗口各自从现金开始，拼接结果不是一条连续持仓的可交易账户轨迹。
+`run_walk_forward_event_backtest(..., train_size=205, test_size=63, commission_bps=10, slippage_bps=10)` 提供冻结参数的非重叠测试窗口；`train_size`最低55，使用205可复核原完整历史区间。单次回放也可显式传入 `min_history=205`。训练段只作指标预热，不优化参数；窗口各自从现金开始，拼接结果不是一条连续持仓的可交易账户轨迹。
+
+评估起点缺少EMA200时，EMA50/200对照标记为 `not_computable`，指标为null，不将等待期现金收益当作有效对照；买入持有仍使用相同评估日期。
 
 新指标的成本后超额收益尚未获得真实跨市场样本外验证。测试数据只验证计算和交易流程，不能作为收益宣传。交易日历/停牌/涨跌停/最小价位/整手/企业行为和点时复权差异均需在实盘使用前另行核对。

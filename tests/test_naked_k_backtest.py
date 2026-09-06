@@ -36,6 +36,25 @@ def candidate(stop=90.0, maximum=101.5, action="小仓试错"):
 
 
 class BacktestTests(unittest.TestCase):
+    def test_default_warmup_uses_55_signals_and_executes_on_bar_56(self):
+        builder = scripted({55: candidate(stop=45, maximum=60)})
+        result = bt.run_event_backtest("x", "X", bars(range(1, 57)), commission_bps=0,
+            slippage_bps=0, signal_builder=builder)
+        self.assertEqual(builder.calls[0][0], 55)
+        self.assertEqual(result["open_position"]["entry_date"], "2025-02-25")
+        self.assertEqual(result["audit"]["evaluated_from"], "2025-02-24")
+
+    def test_production_history_boundary_rejects_54_and_allows_55(self):
+        short = bt.run_event_backtest("x", "X", bars(range(1, 55)), commission_bps=0, slippage_bps=0)
+        with self.assertRaises(ValueError):
+            bt.run_event_backtest("x", "X", bars(range(1, 57)), commission_bps=0,
+                slippage_bps=0, min_history=54)
+        ready = bt.run_event_backtest("x", "X", bars(range(1, 57)), commission_bps=0,
+            slippage_bps=0, min_history=55)
+        self.assertEqual(short["status"], "insufficient_history")
+        self.assertEqual(ready["status"], "completed")
+        self.assertEqual(ready["metadata"]["minimum_history"], 55)
+
     def test_gap_entry_is_rejected_at_actual_slipped_open(self):
         result = bt.run_event_backtest("x", "X", bars([100, 100, 120]), commission_bps=0,
             slippage_bps=0, min_history=2, signal_builder=scripted({2: candidate()}))
@@ -96,6 +115,15 @@ class BacktestTests(unittest.TestCase):
         with patch.object(bt, "indicator_frame", return_value=indicators):
             result = bt._comparison(frame, 0, 0, 0, bt.TradingConfig(), True, 100)
         self.assertAlmostEqual(result["equity"][-1], 132.25)
+        self.assertEqual(result["status"], "completed")
+
+    def test_ema_comparison_is_not_computable_without_initial_ema200(self):
+        frame = bars(range(1, 58))
+        result = bt._comparison(frame, 54, 0, 0, bt.TradingConfig(), True, 100)
+        self.assertEqual(result["status"], "not_computable")
+        self.assertIsNone(result["metrics"])
+        self.assertEqual(result["equity"], [])
+        self.assertIn("EMA200", result["reason"])
 
     def test_avoid_action_cannot_enter(self):
         for action in ("回避", "减仓", "unexpected"):
@@ -158,6 +186,31 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(len(dates), len(set(dates)))
         self.assertEqual(result["comparisons"]["buy_hold"]["period_start"], windows[0]["test_start"].strftime("%Y-%m-%d"))
         self.assertEqual(result["audit"]["mode"], "stitched_independent_windows")
+
+    def test_walk_forward_accepts_55_bar_training_and_propagates_unavailable_comparison(self):
+        frame = bars(range(1, 66))
+        with self.assertRaises(ValueError):
+            bt.build_walk_forward_windows(frame, 54, 5)
+        windows = bt.build_walk_forward_windows(frame, 55, 5)
+        self.assertEqual(len(windows), 2)
+        result = bt.run_walk_forward_event_backtest("x", "X", frame, 55, 5,
+            commission_bps=0, slippage_bps=0, signal_builder=scripted({}))
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["comparisons"]["ema50_200"]["status"], "not_computable")
+        self.assertIsNone(result["comparisons"]["ema50_200"]["metrics"])
+        self.assertEqual(result["comparisons"]["ema50_200"]["equity"], [])
+
+    def test_real_signal_entry_and_mode_switch_are_causal(self):
+        closes = [40] * 49 + [40, 40.5, 41, 41.5, 42, 46.1, 46.1] + list(range(47, 201))
+        frame = bars(closes, lows=[value - 2 for value in closes], closes=closes)
+        first_signal = bt.analyze_trend(frame.iloc[:55])
+        self.assertTrue(first_signal["entry_candidate"])
+        result = bt.run_event_backtest("x", "X", frame, commission_bps=0, slippage_bps=0)
+        self.assertEqual(result["open_position"]["entry_date"], "2025-02-25")
+        transitions = result["audit"]["signal_mode_transitions"]
+        self.assertEqual([(item["daily_rows"], item["history_mode"], item["direction_basis"])
+                          for item in transitions], [(55, "short", "ema20_50"), (205, "full", "ema50_200")])
+        self.assertEqual({item["rule_version"] for item in transitions}, {"technical-trend-v2"})
 
     def test_walk_forward_preserves_open_window_positions_and_explains_marked_synthesis(self):
         frame = bars([100] * 205 + list(range(100, 110)), lows=[99] * 215)

@@ -18,6 +18,8 @@ The user approved a transition from naked-candlestick-only analysis to daily swi
 - Add failing tests before changing signal or risk behavior. Tests never use the live network.
 - Preserve data quality, closed-bar checks, cross-timeframe adjustment warnings and UTC timestamp regressions.
 - Use only data available at the signal timestamp. Channels exclude the signal bar; structural pivots are available only after confirmation.
+- Rule version `technical-trend-v2`: below 55 daily bars stays unknown; 55–204 uses Close/EMA20/EMA50 and the five-day EMA50 slope with explicit short-history labeling; 205+ retains Close/EMA50/EMA200. Shared constants live in `naked_k_trend.py`; do not fabricate EMA200 or special-case tickers.
+- Backtest production warmup is at least 55 bars. Mark EMA50/200 comparisons unavailable if EMA200 is missing at the initial signal; never report a cash-only curve as a valid unavailable benchmark. Report mode changes using only each signal's available prefix.
 - Trend strength is not direction, a risk multiple is not a target prediction, and a rule threshold is not a calibrated probability.
 - News contains source/date/title metadata only and must never alter technical actions; failure must preserve the technical report. Do not restore LLM direction synthesis or institutional-flow inference.
 - Unknown account holdings or drawdown are not zero. Proposed budgets are not actual exposure; defensive actions never open shorts.
@@ -35,5 +37,6 @@ python -m unittest discover -v
 ```
 
 Design: `docs/superpowers/specs/2026-09-06-technical-trend-streamline-design.md`.
+Short-history extension: `docs/superpowers/specs/2026-09-06-short-history-trend-design.md`.
 Implementation ledger: `docs/superpowers/plans/2026-09-06-technical-trend-streamline.md`.
 Earlier specs describe the retired system and are retained as history, not current product requirements.

@@ -64,12 +64,64 @@ class IndicatorTests(unittest.TestCase):
 
 
 class TrendTests(unittest.TestCase):
-    def test_short_history_displays_available_math_but_is_not_ready(self):
-        signal = analyze_trend(prices(range(10, 70)))
+    def test_insufficient_history_displays_available_math_but_is_not_ready(self):
+        signal = analyze_trend(prices(range(10, 64)))
         self.assertEqual(signal["status"], "insufficient_history")
         self.assertEqual(signal["direction"], "unknown")
         self.assertIsNotNone(signal["indicators"]["ema50"])
         self.assertFalse(signal["entry_candidate"])
+
+    def test_history_mode_boundaries_and_available_ema200(self):
+        for size, mode, basis in [(54, 'insufficient', 'unavailable'), (55, 'short', 'ema20_50'),
+                                  (199, 'short', 'ema20_50'), (200, 'short', 'ema20_50'),
+                                  (204, 'short', 'ema20_50'), (205, 'full', 'ema50_200')]:
+            with self.subTest(size=size):
+                signal = analyze_trend(prices(np.linspace(100, 110, size)))
+                self.assertEqual(signal['history_mode'], mode)
+                self.assertEqual(signal['direction_basis'], basis)
+                self.assertEqual(signal['daily_rows'], size)
+                self.assertEqual(signal['rule_version'], 'technical-trend-v2')
+                self.assertEqual(signal['direction'], 'unknown' if size < 55 else 'up')
+                self.assertEqual(signal['status'], 'insufficient_history' if size < 55 else 'ready')
+                self.assertEqual(signal['indicators']['ema200'] is None, size < 200)
+
+    def test_short_history_direction_and_existing_position_exit(self):
+        for close, direction, exit_signal in [(np.linspace(100, 110, 69), 'up', False),
+                                              (np.linspace(110, 100, 69), 'down', True),
+                                              (np.full(69, 100.), 'transition', False)]:
+            with self.subTest(direction=direction):
+                signal = analyze_trend(prices(close))
+                self.assertEqual(signal['direction'], direction)
+                self.assertEqual(signal['exit_signal'], exit_signal)
+
+    def test_short_history_breakout_and_risk_filters(self):
+        base = np.r_[np.linspace(100, 110, 34), np.full(20, 110.)]
+        first = analyze_trend(prices(np.r_[base, 111.2]))
+        repeated = analyze_trend(prices(np.r_[base, 111.2, 112.3]))
+        self.assertTrue(first['entry_candidate'])
+        self.assertTrue(evaluate_entry(first, 111.2)['eligible'])
+        self.assertFalse(evaluate_entry(first, first['max_entry'] + 1)['eligible'])
+        self.assertFalse(repeated['breakout'])
+        self.assertFalse(repeated['entry_candidate'])
+        overextended = analyze_trend(prices(np.r_[base, 150.]))
+        self.assertTrue(overextended['breakout'])
+        self.assertFalse(overextended['entry_candidate'])
+        zones = {'nearest_support': None, 'nearest_resistance': {'lower': 111., 'upper': 113.},
+                 'zones': [], 'anchored_vwap': None}
+        with patch('naked_k_trend.detect_price_zones', return_value=zones):
+            blocked = analyze_trend(prices(np.r_[base, 111.2]))
+        self.assertFalse(blocked['entry_candidate'])
+        self.assertIn('resistance_within_1r', blocked['reasons'])
+
+    def test_full_mode_keeps_original_rule_even_when_ema20_disagrees(self):
+        frame = prices(np.r_[np.linspace(100, 160, 200), [158., 157., 156., 155., 154.]])
+        signal = analyze_trend(frame)
+        ind = signal['indicators']
+        self.assertLess(signal['close'], ind['ema20'])
+        self.assertGreater(signal['close'], ind['ema50'])
+        self.assertGreater(ind['ema50'], ind['ema200'])
+        self.assertGreater(ind['ema50_slope'], 0)
+        self.assertEqual(signal['direction'], 'up')
 
     def test_uptrend_fresh_breakout_does_not_repeat(self):
         base = np.r_[np.linspace(50, 200, 184), np.full(20, 200.0)]

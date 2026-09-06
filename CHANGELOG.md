@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add automatic EMA20/50 short-history assessment for 55–204 daily bars, with explicit missing long-term context; keep the 205+ bar direction rule and all entry/risk constraints.
+- Use `technical-trend-v2` in reports, JSON, journal and audit, including history mode and sample size; preserve earlier artifacts.
+- Support 55-bar production backtest warmup and explicitly unavailable EMA50/200 comparisons when long-history data is missing.
+- Display both support/resistance zone bounds rather than a single midpoint or lower edge.
 
 ## v4.0.0 — 2026-09-06
 
