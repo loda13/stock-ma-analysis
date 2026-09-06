@@ -1,0 +1,8 @@
+{
+  "as_of": "2026-09-04",
+  "current_drawdown_pct": 2.0,
+  "consecutive_losses": 1,
+  "positions": [
+    {"ticker": "EXAMPLE", "gross_pct": 10.0, "account_risk_pct": 0.5, "stop_loss": null}
+  ]
+}

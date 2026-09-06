@@ -5,6 +5,14 @@ import naked_k_risk
 
 
 class NakedKRiskTests(unittest.TestCase):
+    def test_rounding_never_exceeds_account_risk_and_invalid_stop_fails(self):
+        plan = naked_k_risk.build_risk_plan("买入", 100, 93.4, None, account_risk_pct=1)
+        self.assertLessEqual(plan["suggested_gross_pct"] * 6.6 / 100, 1)
+        for stop in [100, 101, float("nan")]:
+            with self.assertRaises(ValueError):
+                naked_k_risk.build_risk_plan("买入", 100, stop, None)
+
+
     def test_builds_long_risk_plan_with_r_targets_and_position_cap(self):
         plan = naked_k_risk.build_risk_plan(
             action="小仓试错",
@@ -17,7 +25,7 @@ class NakedKRiskTests(unittest.TestCase):
         self.assertEqual(plan["direction"], "long")
         self.assertEqual(plan["status"], "active")
         self.assertEqual(plan["risk_per_share"], 10.0)
-        self.assertEqual(plan["risk_pct"], 9.52)
+        self.assertAlmostEqual(plan["risk_pct"], 10 / 105 * 100)
         self.assertEqual(plan["suggested_gross_pct"], 10.5)
         self.assertEqual(plan["targets_by_r"]["1R"], 115.0)
         self.assertEqual(plan["targets_by_r"]["2R"], 125.0)
@@ -105,3 +113,12 @@ class NakedKRiskTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrecisionTests(unittest.TestCase):
+    def test_risk_json_keeps_price_precision_and_loss_reduction_never_rounds_up(self):
+        plan = naked_k_risk.build_risk_plan('小仓试错', 1.001, 0.997, None,
+                                          account_risk_pct=0.015, consecutive_losses=3)
+        self.assertEqual(plan['entry'], 1.001)
+        self.assertEqual(plan['stop'], 0.997)
+        self.assertAlmostEqual(plan['effective_account_risk_pct'], 0.0075)

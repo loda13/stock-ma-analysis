@@ -30,21 +30,3 @@ class FakeResponse:
         if isinstance(self.payload, Exception):
             raise self.payload
         return self.payload
-
-
-class LegacyResponse:
-    """Fake OpenAI-compatible response for legacy LLM tests."""
-
-    def raise_for_status(self) -> None:
-        pass
-
-    def json(self) -> dict[str, Any]:
-        return {
-            "choices": [
-                {
-                    "message": {
-                        "content": '{"market_reading":"独立复盘","journal_note":"等待确认"}'
-                    }
-                }
-            ]
-        }

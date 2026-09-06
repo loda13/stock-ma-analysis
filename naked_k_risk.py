@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import math
 
 import naked_k_config
 
@@ -33,12 +34,6 @@ def _targets_by_r(direction: str, entry: float, risk_per_share: float) -> dict[s
             "2R": round(entry + risk_per_share * 2, 2),
             "3R": round(entry + risk_per_share * 3, 2),
         }
-    if direction == "short":
-        return {
-            "1R": round(entry - risk_per_share, 2),
-            "2R": round(entry - risk_per_share * 2, 2),
-            "3R": round(entry - risk_per_share * 3, 2),
-        }
     return {}
 
 
@@ -47,8 +42,6 @@ def _target_r_multiple(direction: str, entry: float, target: float | None, risk_
         return None
     if direction == "long" and target > entry:
         return round((target - entry) / risk_per_share, 2)
-    if direction == "short" and target < entry:
-        return round((entry - target) / risk_per_share, 2)
     return None
 
 
@@ -70,8 +63,16 @@ def build_risk_plan(
     max_drawdown_pct: float = 8.0,
     consecutive_losses: int = 0,
     config: naked_k_config.RiskConfig | None = None,
-    defensive_residual: bool = False,
 ) -> dict[str, Any]:
+    naked_k_config.number(entry_trigger, "entry_trigger", 1e-12, float("inf"))
+    naked_k_config.number(stop_loss, "stop_loss", 1e-12, float("inf"))
+    naked_k_config.number(account_risk_pct, "account_risk_pct")
+    naked_k_config.number(current_drawdown_pct, "current_drawdown_pct")
+    naked_k_config.number(max_drawdown_pct, "max_drawdown_pct", 0.01)
+    if type(consecutive_losses) is not int or consecutive_losses < 0:
+        raise ValueError("consecutive_losses must be a nonnegative integer")
+    if action in BULLISH_ACTIONS and stop_loss >= entry_trigger:
+        raise ValueError("long stop must be below entry")
     if config is not None:
         if account_risk_pct == 1.0:
             account_risk_pct = config.account_risk_pct
@@ -86,13 +87,11 @@ def build_risk_plan(
         action_gross_caps = ACTION_GROSS_CAPS
 
     direction = _direction_for_action(action)
-    risk_per_share = round(abs(entry_trigger - stop_loss), 2)
-    risk_pct = round(risk_per_share / entry_trigger * 100, 2) if entry_trigger > 0 else 0.0
+    risk_per_share = abs(entry_trigger - stop_loss)
+    risk_pct = risk_per_share / entry_trigger * 100
     max_gross_pct = float(action_gross_caps.get(action, 0.0))
     guardrails: list[str] = []
-    status = "active" if (
-        direction in {"long", "short"} or defensive_residual
-    ) and max_gross_pct > 0 else "flat"
+    status = "active" if direction == "long" and max_gross_pct > 0 else "flat"
     effective_account_risk_pct = float(account_risk_pct)
 
     if current_drawdown_pct >= max_drawdown_pct:
@@ -101,7 +100,7 @@ def build_risk_plan(
         guardrails.append("最大回撤保护")
     elif consecutive_losses >= consecutive_loss_limit and status == "active":
         status = "reduced"
-        effective_account_risk_pct = round(account_risk_pct * consecutive_loss_risk_multiplier, 2)
+        effective_account_risk_pct = account_risk_pct * consecutive_loss_risk_multiplier
         guardrails.append("连续亏损降风险")
 
     if status in {"blocked", "flat"} or risk_pct <= 0:
@@ -111,15 +110,15 @@ def build_risk_plan(
             effective_account_risk_pct = 0.0
     else:
         risk_budget_cap = effective_account_risk_pct / risk_pct * 100
-        suggested_gross_pct = round(min(max_gross_pct, risk_budget_cap), 1)
+        suggested_gross_pct = math.floor(min(max_gross_pct, risk_budget_cap) * 10 + 1e-9) / 10
 
     targets = _targets_by_r(direction, float(entry_trigger), risk_per_share)
     return {
         "status": status,
         "direction": direction,
-        "entry": round(float(entry_trigger), 2),
-        "stop": round(float(stop_loss), 2),
-        "target": round(float(target_price), 2) if target_price is not None else None,
+        "entry": float(entry_trigger),
+        "stop": float(stop_loss),
+        "target": float(target_price) if target_price is not None else None,
         "risk_per_share": risk_per_share,
         "risk_pct": risk_pct,
         "risk_level": _risk_level(risk_pct),

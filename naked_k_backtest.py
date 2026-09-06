@@ -1,499 +1,362 @@
+"""Offline, causal long/cash backtest for the production trend signal."""
 from __future__ import annotations
 
+import argparse
+import json
 import math
-import random
-from typing import Any
+from dataclasses import asdict
+from pathlib import Path
+from statistics import stdev
+from typing import Any, Callable
 
 import pandas as pd
 
-
-LONG_ACTIONS = {"买入", "小仓试错"}
-SHORT_ACTIONS = {"减仓", "回避"}
-DEFAULT_MARKET_CYCLES = ["trend", "range", "high_volatility", "low_volatility_compression", "bear"]
-
-
-def build_walk_forward_windows(
-    frame: pd.DataFrame,
-    train_size: int,
-    test_size: int,
-    step: int | None = None,
-) -> list[dict[str, Any]]:
-    if train_size <= 0 or test_size <= 0:
-        raise ValueError("train_size and test_size must be positive")
-    if frame.empty:
-        return []
-
-    step_size = step or test_size
-    if step_size <= 0:
-        raise ValueError("step must be positive")
-
-    windows: list[dict[str, Any]] = []
-    start = 0
-    total = len(frame)
-    while start + train_size + test_size <= total:
-        train_start = start
-        train_end = start + train_size
-        test_end = train_end + test_size
-        train = frame.iloc[train_start:train_end].copy()
-        test = frame.iloc[train_end:test_end].copy()
-        windows.append(
-            {
-                "train": train,
-                "test": test,
-                "train_start": train.index[0],
-                "train_end": train.index[-1],
-                "test_start": test.index[0],
-                "test_end": test.index[-1],
-            }
-        )
-        start += step_size
-    return windows
+from naked_k_config import TradingConfig, load_trading_config
+from naked_k_risk import build_risk_plan
+from naked_k_trend import analyze_trend, evaluate_entry, indicator_frame
+from naked_k_zones import validate_ohlcv
 
 
-def _clean_ohlcv(frame: pd.DataFrame) -> pd.DataFrame:
-    if frame.empty:
-        return frame.copy()
-    columns = [column for column in ["Open", "High", "Low", "Close", "Volume"] if column in frame.columns]
-    clean = frame[columns].dropna().copy()
-    clean.index = pd.to_datetime(clean.index)
-    return clean.sort_index()
+SignalBuilder = Callable[[pd.DataFrame], dict[str, Any]]
+SCHEMA_VERSION = "1.0"
+RULE_VERSION = "technical-trend-v1"
 
 
-def _history_until(frame: pd.DataFrame | None, timestamp: pd.Timestamp) -> pd.DataFrame | None:
-    if frame is None:
-        return None
-    clean = _clean_ohlcv(frame)
-    if clean.empty:
-        return clean
-    return clean.loc[clean.index <= timestamp].copy()
-
-
-def _value(report: Any, field: str, default: Any = None) -> Any:
-    if isinstance(report, dict):
-        return report.get(field, default)
-    return getattr(report, field, default)
-
-
-def _date_text(value: Any) -> str:
+def _date(value: Any) -> str:
     return pd.Timestamp(value).strftime("%Y-%m-%d")
 
 
-def _target_r(report: Any, entry: float, target: float | None, risk: float) -> float | None:
-    reward_to_risk = _value(report, "reward_to_risk")
-    if reward_to_risk is not None:
-        return round(float(reward_to_risk), 2)
-    if target is None or risk <= 0:
-        return None
-    return round(abs(float(target) - entry) / risk, 2)
+def _cost(value: float, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value < 10000:
+        raise ValueError(f"{name} must be finite and in [0, 10000)")
+    return float(value) / 10000
 
 
-def _evaluate_report_on_next_bar(report: Any, execution_bar: pd.Series, execution_date: Any) -> dict[str, Any]:
-    action = str(_value(report, "action", "观望"))
-    entry = float(_value(report, "entry_trigger", 0.0))
-    stop = float(_value(report, "stop_loss", 0.0))
-    target_value = _value(report, "target_price")
-    target = float(target_value) if target_value is not None else None
-    risk = float(_value(report, "risk_per_share", 0.0) or abs(entry - stop))
-    if risk <= 0 or entry <= 0:
-        return {"status": "skipped", "reason": "invalid_risk"}
-
-    high = float(execution_bar["High"])
-    low = float(execution_bar["Low"])
-    close = float(execution_bar["Close"])
-    execution_date_text = _date_text(execution_date)
-
-    if action in LONG_ACTIONS:
-        if high < entry:
-            return {"status": "skipped", "reason": "not_triggered", "execution_date": execution_date_text}
-        if low <= stop:
-            return {
-                "status": "closed",
-                "direction": "long",
-                "exit_reason": "stop",
-                "exit_price": round(stop, 2),
-                "r_multiple": -1.0,
-                "execution_date": execution_date_text,
-            }
-        if target is not None and high >= target:
-            return {
-                "status": "closed",
-                "direction": "long",
-                "exit_reason": "target",
-                "exit_price": round(target, 2),
-                "r_multiple": _target_r(report, entry, target, risk),
-                "execution_date": execution_date_text,
-            }
-        return {
-            "status": "closed",
-            "direction": "long",
-            "exit_reason": "close",
-            "exit_price": round(close, 2),
-            "r_multiple": round((close - entry) / risk, 2),
-            "execution_date": execution_date_text,
-        }
-
-    if action in SHORT_ACTIONS:
-        if low > entry:
-            return {"status": "skipped", "reason": "not_triggered", "execution_date": execution_date_text}
-        if high >= stop:
-            return {
-                "status": "closed",
-                "direction": "short",
-                "exit_reason": "stop",
-                "exit_price": round(stop, 2),
-                "r_multiple": -1.0,
-                "execution_date": execution_date_text,
-            }
-        if target is not None and low <= target:
-            return {
-                "status": "closed",
-                "direction": "short",
-                "exit_reason": "target",
-                "exit_price": round(target, 2),
-                "r_multiple": _target_r(report, entry, target, risk),
-                "execution_date": execution_date_text,
-            }
-        return {
-            "status": "closed",
-            "direction": "short",
-            "exit_reason": "close",
-            "exit_price": round(close, 2),
-            "r_multiple": round((entry - close) / risk, 2),
-            "execution_date": execution_date_text,
-        }
-
-    return {"status": "skipped", "reason": "non_actionable", "execution_date": execution_date_text}
+def _clean(frame: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame):
+        raise ValueError("daily must be a DataFrame")
+    data = frame.copy()
+    if not isinstance(data.index, pd.DatetimeIndex):
+        data.index = pd.to_datetime(data.index)
+    if data.index.hasnans:
+        raise ValueError("daily index cannot contain NaT")
+    return validate_ohlcv(data)
 
 
-def run_event_backtest(
-    name: str,
-    ticker: str,
-    daily: pd.DataFrame,
-    weekly: pd.DataFrame | None = None,
-    monthly: pd.DataFrame | None = None,
-    min_history: int = 60,
-    plan_builder: Any | None = None,
-) -> dict[str, Any]:
-    if min_history < 2:
-        raise ValueError("min_history must be at least 2")
-    clean_daily = _clean_ohlcv(daily)
-    if len(clean_daily) <= min_history:
-        return {
-            "trades": [],
-            "skipped": [],
-            "metrics": calculate_performance_metrics([]),
-            "cycle_validation": evaluate_market_cycle_performance([]),
-            "audit": {
-                "no_lookahead": True,
-                "evaluated_signals": 0,
-                "generated_trades": 0,
-                "skipped": 0,
-            },
-        }
-
-    if plan_builder is None:
-        import naked_k_planner
-
-        plan_builder = naked_k_planner.build_trade_plan
-
-    trades: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    no_lookahead = True
-    evaluated_signals = 0
-
-    for signal_pos in range(min_history - 1, len(clean_daily) - 1):
-        signal_history = clean_daily.iloc[: signal_pos + 1].copy()
-        signal_date = pd.Timestamp(signal_history.index[-1])
-        execution_date = pd.Timestamp(clean_daily.index[signal_pos + 1])
-        weekly_history = _history_until(weekly, signal_date) if weekly is not None else signal_history
-        monthly_history = _history_until(monthly, signal_date) if monthly is not None else None
-        if weekly_history is None or weekly_history.empty:
-            weekly_history = signal_history
-
-        report = plan_builder(
-            name,
-            ticker,
-            signal_history,
-            weekly_history,
-            previous=None,
-            intraday=None,
-            monthly=monthly_history,
-        )
-        evaluated_signals += 1
-        latest_dates = _value(report, "latest_k_dates", {}) or {}
-        latest_daily = latest_dates.get("daily")
-        if not signal_date < execution_date:
-            no_lookahead = False
-        if latest_daily and pd.Timestamp(latest_daily) > signal_date:
-            no_lookahead = False
-
-        result = _evaluate_report_on_next_bar(report, clean_daily.iloc[signal_pos + 1], execution_date)
-        base = {
-            "ticker": ticker,
-            "signal_date": _date_text(signal_date),
-            "execution_date": _date_text(execution_date),
-            "action": _value(report, "action", "观望"),
-            "entry_trigger": round(float(_value(report, "entry_trigger", 0.0)), 2),
-            "stop_loss": round(float(_value(report, "stop_loss", 0.0)), 2),
-            "target_price": _value(report, "target_price"),
-            "setup": (_value(report, "trade_setup", {}) or {}).get("key"),
-            "regime": (_value(report, "market_regime", {}) or {}).get("state"),
-        }
-        if result["status"] == "closed":
-            trades.append({**base, **result})
-        else:
-            skipped.append({**base, **result})
-
-    return {
-        "trades": trades,
-        "skipped": skipped,
-        "metrics": calculate_performance_metrics(trades),
-        "cycle_validation": evaluate_market_cycle_performance(trades),
-        "audit": {
-            "no_lookahead": no_lookahead,
-            "evaluated_signals": evaluated_signals,
-            "generated_trades": len(trades),
-            "skipped": len(skipped),
-        },
-    }
+def build_walk_forward_windows(frame: pd.DataFrame, train_size: int, test_size: int,
+                               step: int | None = None) -> list[dict[str, Any]]:
+    if type(train_size) is not int or type(test_size) is not int or (step is not None and type(step) is not int):
+        raise ValueError("train_size, test_size, and step must be integers")
+    if train_size < 205 or test_size <= 0:
+        raise ValueError("train_size must be at least 205 and test_size must be positive")
+    stride = test_size if step is None else step
+    if stride < test_size:
+        raise ValueError("step must be at least test_size so test windows do not overlap")
+    windows = []
+    for start in range(0, len(frame) - train_size - test_size + 1, stride):
+        train, test = frame.iloc[start:start + train_size].copy(), frame.iloc[start + train_size:start + train_size + test_size].copy()
+        windows.append({"train": train, "test": test, "train_start": train.index[0], "train_end": train.index[-1],
+                        "test_start": test.index[0], "test_end": test.index[-1]})
+    return windows
 
 
-def run_walk_forward_event_backtest(
-    name: str,
-    ticker: str,
-    daily: pd.DataFrame,
-    train_size: int,
-    test_size: int,
-    step: int | None = None,
-    weekly: pd.DataFrame | None = None,
-    monthly: pd.DataFrame | None = None,
-    plan_builder: Any | None = None,
-) -> dict[str, Any]:
-    clean_daily = _clean_ohlcv(daily)
-    windows = build_walk_forward_windows(clean_daily, train_size=train_size, test_size=test_size, step=step)
-    window_results: list[dict[str, Any]] = []
-    all_trades: list[dict[str, Any]] = []
-    all_skipped: list[dict[str, Any]] = []
-    no_lookahead = True
-
-    for index, window in enumerate(windows, start=1):
-        combined = pd.concat([window["train"], window["test"]]).sort_index()
-        test_end = pd.Timestamp(window["test_end"])
-        weekly_window = _history_until(weekly, test_end) if weekly is not None else None
-        monthly_window = _history_until(monthly, test_end) if monthly is not None else None
-        result = run_event_backtest(
-            name=name,
-            ticker=ticker,
-            daily=combined,
-            weekly=weekly_window,
-            monthly=monthly_window,
-            min_history=len(window["train"]),
-            plan_builder=plan_builder,
-        )
-        no_lookahead = no_lookahead and bool(result["audit"]["no_lookahead"])
-        all_trades.extend(result["trades"])
-        all_skipped.extend(result["skipped"])
-        window_results.append(
-            {
-                "window": index,
-                "train_start": _date_text(window["train_start"]),
-                "train_end": _date_text(window["train_end"]),
-                "test_start": _date_text(window["test_start"]),
-                "test_end": _date_text(window["test_end"]),
-                "trades": result["trades"],
-                "skipped": result["skipped"],
-                "metrics": result["metrics"],
-                "cycle_validation": result["cycle_validation"],
-                "audit": result["audit"],
-            }
-        )
-
-    return {
-        "windows": window_results,
-        "trades": all_trades,
-        "skipped": all_skipped,
-        "metrics": calculate_performance_metrics(all_trades),
-        "cycle_validation": evaluate_market_cycle_performance(all_trades),
-        "audit": {
-            "no_lookahead": no_lookahead,
-            "window_count": len(window_results),
-            "generated_trades": len(all_trades),
-            "skipped": len(all_skipped),
-        },
-    }
+def _daily_returns(equity: list[float]) -> list[float]:
+    return [equity[i] / equity[i - 1] - 1 for i in range(1, len(equity)) if equity[i - 1] > 0]
 
 
-def _r_multiples(trades: list[dict[str, Any]]) -> list[float]:
-    values: list[float] = []
-    for trade in trades:
-        if "r_multiple" not in trade:
-            continue
-        values.append(float(trade["r_multiple"]))
-    return values
+def _exposure_summary(curve: list[dict[str, Any]]) -> dict[str, Any]:
+    values = [float(point["gross_exposure_pct"]) for point in curve]
+    return {"basis": "daily_close_market_value_over_equity",
+            "average_gross_exposure_pct": sum(values) / len(values) if values else None,
+            "maximum_gross_exposure_pct": max(values) if values else None}
 
 
-def _max_drawdown(values: list[float]) -> float:
-    equity = 0.0
-    peak = 0.0
-    max_drawdown = 0.0
-    for value in values:
-        equity += value
+def calculate_performance_metrics(trades: list[dict[str, Any]], equity: list[float]) -> dict[str, Any]:
+    returns = _daily_returns(equity)
+    start, end = (equity[0], equity[-1]) if equity else (0.0, 0.0)
+    peak, max_dd = 0.0, 0.0
+    for value in equity:
+        peak = max(peak, value)
+        if peak:
+            max_dd = max(max_dd, (peak - value) / peak)
+    wins = [float(t["net_pnl"]) for t in trades if t["net_pnl"] > 0]
+    losses = [float(t["net_pnl"]) for t in trades if t["net_pnl"] < 0]
+    rs = [float(t["r_multiple"]) for t in trades]
+    sharpe = None
+    if len(returns) >= 2 and all(math.isfinite(x) for x in returns):
+        sigma = stdev(returns)
+        if sigma > 0: sharpe = sum(returns) / len(returns) / sigma * math.sqrt(252)
+    annualized = None
+    if len(equity) > 1 and start > 0 and end >= 0:
+        annualized = ((end / start) ** (252 / (len(equity) - 1)) - 1) * 100
+    return {"trade_count": len(trades), "total_return_pct": (end / start - 1) * 100 if start else 0.0,
+            "annualized_return_pct": annualized, "max_drawdown_pct": max_dd * 100,
+            "sharpe_ratio": sharpe, "win_rate": len(wins) / len(trades) * 100 if trades else 0.0,
+            "profit_factor": sum(wins) / abs(sum(losses)) if losses else None,
+            "average_r": sum(rs) / len(rs) if rs else 0.0}
+
+
+def _allocation_cap(config: TradingConfig) -> float:
+    p = config.portfolio
+    return min(config.risk.action_gross_caps.get("小仓试错", 0), p.max_total_gross_pct,
+               p.max_single_name_gross_pct, p.max_direction_gross_pct, p.max_market_gross_pct)
+
+
+def _comparison(frame: pd.DataFrame, start_pos: int, commission: float, slip: float,
+                config: TradingConfig, ema: bool, initial_equity: float) -> dict[str, Any]:
+    cap = _allocation_cap(config) / 100
+    cash, units, values = initial_equity, 0.0, [initial_equity]
+    indicators = indicator_frame(frame) if ema else None
+    for i in range(start_pos + 1, len(frame)):
+        row = frame.iloc[i]
+        prior = indicators.iloc[i - 1] if indicators is not None else None
+        enter = units == 0 and (not ema or (prior.Close > prior.ema50 > prior.ema200))
+        exit_now = units and ema and prior.Close < prior.ema50
+        if exit_now:
+            fill = row.Open * (1 - slip)
+            cash += units * fill * (1 - commission)
+            units = 0
+        if enter:
+            fill = row.Open * (1 + slip)
+            current_equity = cash
+            units = min(current_equity * cap / fill, cash / (fill * (1 + commission)))
+            cash -= units * fill * (1 + commission)
+        values.append(cash + units * row.Close)
+    label = "ema50_200_long_cash" if ema else "buy_hold"
+    metrics = calculate_performance_metrics([], values)
+    return {"name": label, "allocation_pct": cap * 100, "period_start": _date(frame.index[start_pos + 1]) if start_pos + 1 < len(frame) else None,
+            "period_end": _date(frame.index[-1]), "cost_adjusted": True, "metrics": metrics,
+            "equity": values, "terminal_position_open": bool(units),
+            "boundary_liquidation_fee_applied": False}
+
+
+def _metadata(frame: pd.DataFrame, config: TradingConfig, commission_bps: float,
+              slippage_bps: float, initial_equity: float, evaluation_start: str | None) -> dict[str, Any]:
+    return {"schema_version": SCHEMA_VERSION, "rule_version": RULE_VERSION,
+            "commission_bps": float(commission_bps), "slippage_bps": float(slippage_bps),
+            "config": asdict(config), "initial_equity": float(initial_equity),
+            "sample_start": _date(frame.index[0]) if len(frame) else None,
+            "sample_end": _date(frame.index[-1]) if len(frame) else None,
+            "evaluation_start": evaluation_start, "evaluation_end": _date(frame.index[-1]) if evaluation_start else None,
+            "annualization": {"periods_per_year": 252, "risk_free_rate": 0.0},
+            "validation_status": "UNVALIDATED"}
+
+
+def _actionable(signal: dict[str, Any]) -> bool:
+    return (signal.get("entry_candidate") is True and signal.get("direction") == "up"
+            and signal.get("action", "小仓试错") in {"买入", "小仓试错"})
+
+
+def run_event_backtest(name: str, ticker: str, daily: pd.DataFrame, *, commission_bps: float,
+                       slippage_bps: float, config: TradingConfig | None = None, min_history: int = 205,
+                       signal_builder: SignalBuilder | None = None, initial_equity: float = 100000.0) -> dict[str, Any]:
+    commission, slip = _cost(commission_bps, "commission_bps"), _cost(slippage_bps, "slippage_bps")
+    if type(min_history) is not int or min_history < 2 or isinstance(initial_equity, bool) or not isinstance(initial_equity, (int, float)) or initial_equity <= 0 or not math.isfinite(initial_equity):
+        raise ValueError("min_history must be at least 2 and initial_equity must be finite and positive")
+    frame, config, builder = _clean(daily), config or TradingConfig(), signal_builder or analyze_trend
+    if signal_builder is None and min_history < 205:
+        raise ValueError("the production trend strategy requires min_history >= 205")
+    evaluation_start = _date(frame.index[min_history]) if len(frame) > min_history else None
+    metadata = _metadata(frame, config, commission_bps, slippage_bps, initial_equity, evaluation_start)
+    if len(frame) <= min_history:
+        return {"name": name, "ticker": ticker, "status": "insufficient_history", "trades": [], "open_position": None,
+                "equity_curve": [], "metrics": None, "comparisons": {}, "metadata": metadata,
+                "exposure": _exposure_summary([]),
+                "external_benchmark": {"return_pct": None, "excess_return_pct": None},
+                "audit": {"no_lookahead": True, "entries": 0, "rejected_entries": [], "cost_label": "gross research" if not commission and not slip else "cost adjusted"}}
+
+    cash, position, pending_entry, pending_exit = initial_equity, None, None, False
+    trades, rejected, curve = [], [], []
+    peak, consecutive_losses = initial_equity, 0
+    first = min_history - 1
+    curve.append({"date": _date(frame.index[first]), "equity": initial_equity, "daily_return": None,
+                  "gross_exposure_pct": 0.0})
+    signal = builder(frame.iloc[:first + 1].copy())
+    if _actionable(signal):
+        pending_entry = signal
+
+    for i in range(first + 1, len(frame)):
+        row, day = frame.iloc[i], frame.index[i]
+        stopped_today = False
+        if position:
+            if row.Open <= position["stop"]:
+                base, reason = row.Open, "stop_gap"
+            elif pending_exit:
+                base, reason = row.Open, "trend_exit"
+            elif row.Low <= position["stop"]:
+                base, reason = position["stop"], "stop"
+            else:
+                base = reason = None
+            if base is not None:
+                fill = float(base) * (1 - slip)
+                exit_commission = position["units"] * fill * commission
+                cash += position["units"] * fill - exit_commission
+                pnl = cash - position["cash_before_entry"]
+                risk = position["initial_dollar_risk"]
+                trade = {**{k: position[k] for k in ("entry_date", "entry_price", "units")}, "exit_date": _date(day),
+                         "exit_price": fill, "direction": "long", "exit_reason": reason,
+                         "holding_days": i - position["entry_index"], "net_pnl": pnl,
+                         "r_multiple": pnl / risk if risk > 0 else None}
+                trades.append(trade)
+                consecutive_losses = consecutive_losses + 1 if pnl < 0 else 0
+                position, pending_exit, stopped_today = None, False, True
+
+        if position is None and pending_entry is not None and not stopped_today:
+            fill = float(row.Open) * (1 + slip)
+            check = evaluate_entry(pending_entry, fill)
+            if check["eligible"] and _actionable(pending_entry):
+                current_equity = cash
+                drawdown = max(0.0, (peak - current_equity) / peak * 100) if peak else 0.0
+                plan = build_risk_plan("小仓试错", fill, float(check["stop"]), None,
+                    current_drawdown_pct=drawdown, consecutive_losses=consecutive_losses, config=config.risk)
+                account_risk_gross = config.portfolio.max_total_account_risk_pct / plan["risk_pct"] * 100
+                gross = min(plan["suggested_gross_pct"], _allocation_cap(config), account_risk_gross) / 100
+                units = min(current_equity * gross / fill, cash / (fill * (1 + commission))) if gross > 0 else 0
+                if units > 0:
+                    before, entry_commission = cash, units * fill * commission
+                    cash -= units * fill + entry_commission
+                    position = {"entry_date": _date(day), "entry_price": fill, "entry_index": i, "units": units,
+                                "stop": float(check["stop"]), "initial_dollar_risk": units * (fill - float(check["stop"])),
+                                "cash_before_entry": before}
+                    if row.Low <= position["stop"]:
+                        exit_fill = position["stop"] * (1 - slip)
+                        exit_commission = units * exit_fill * commission
+                        cash += units * exit_fill - exit_commission
+                        pnl = cash - before
+                        trades.append({"entry_date": _date(day), "entry_price": fill, "exit_date": _date(day),
+                            "exit_price": exit_fill, "direction": "long", "exit_reason": "stop", "holding_days": 0,
+                            "units": units, "net_pnl": pnl, "r_multiple": pnl / position["initial_dollar_risk"]})
+                        consecutive_losses = consecutive_losses + 1 if pnl < 0 else 0
+                        position = None
+            else:
+                rejected.append({"signal_date": pending_entry.get("as_of"), "execution_date": _date(day), "reason": check["reason"]})
+            pending_entry = None
+
+        equity = cash + (position["units"] * row.Close if position else 0)
+        previous = curve[-1]["equity"]
+        exposure = position["units"] * row.Close / equity * 100 if position and equity > 0 else 0.0
+        curve.append({"date": _date(day), "equity": equity, "daily_return": equity / previous - 1,
+                      "gross_exposure_pct": exposure})
         peak = max(peak, equity)
-        max_drawdown = max(max_drawdown, peak - equity)
-    return max_drawdown
+        signal = builder(frame.iloc[:i + 1].copy())
+        if position:
+            new_stop = signal.get("stop_loss")
+            if isinstance(new_stop, (int, float)) and math.isfinite(new_stop) and position["stop"] < new_stop < row.Close:
+                position["stop"] = float(new_stop)
+            pending_exit = bool(signal.get("exit_signal"))
+        elif _actionable(signal):
+            pending_entry = signal
+
+    equity_values = [point["equity"] for point in curve]
+    comparisons = {"buy_hold": _comparison(frame, first, commission, slip, config, False, initial_equity),
+                   "ema50_200": _comparison(frame, first, commission, slip, config, True, initial_equity)}
+    public_position = None if not position else {k: position[k] for k in ("entry_date", "entry_price", "units", "stop", "initial_dollar_risk")}
+    return {"name": name, "ticker": ticker, "status": "completed", "trades": trades, "open_position": public_position,
+            "equity_curve": curve, "metrics": calculate_performance_metrics(trades, equity_values), "comparisons": comparisons,
+            "metadata": metadata, "exposure": _exposure_summary(curve),
+            "external_benchmark": {"return_pct": None, "excess_return_pct": None},
+            "audit": {"no_lookahead": True, "entries": len(trades) + bool(position), "rejected_entries": rejected,
+                      "evaluated_from": _date(frame.index[first]), "cost_label": "gross research" if not commission and not slip else "cost adjusted",
+                      "fractional_units": True}}
 
 
-def _sharpe(values: list[float]) -> float | None:
-    if len(values) < 2:
-        return None
-    average = sum(values) / len(values)
-    variance = sum((value - average) ** 2 for value in values) / (len(values) - 1)
-    stddev = math.sqrt(variance)
-    if stddev <= 0:
-        return None
-    return average / stddev * math.sqrt(len(values))
+def run_walk_forward_event_backtest(name: str, ticker: str, daily: pd.DataFrame, train_size: int,
+                                    test_size: int, *, commission_bps: float, slippage_bps: float,
+                                    step: int | None = None, config: TradingConfig | None = None,
+                                    signal_builder: SignalBuilder | None = None) -> dict[str, Any]:
+    _cost(commission_bps, "commission_bps")
+    _cost(slippage_bps, "slippage_bps")
+    frame = _clean(daily)
+    windows = build_walk_forward_windows(frame, train_size, test_size, step)
+    active_config = config or TradingConfig()
+    results, trades, stitched, equity = [], [], [], 100000.0
+    for number, window in enumerate(windows, 1):
+        combined = pd.concat([window["train"], window["test"]])
+        result = run_event_backtest(name, ticker, combined, commission_bps=commission_bps,
+            slippage_bps=slippage_bps, config=active_config, min_history=train_size,
+            signal_builder=signal_builder, initial_equity=100000.0)
+        test_curve = result["equity_curve"][1:]
+        for point in test_curve:
+            equity *= 1 + point["daily_return"]
+            stitched.append({"date": point["date"], "equity": equity, "daily_return": point["daily_return"],
+                             "gross_exposure_pct": point["gross_exposure_pct"]})
+        tagged = [{**trade, "window": number} for trade in result["trades"]]
+        trades.extend(tagged)
+        results.append({"window": number, "train_start": _date(window["train_start"]), "train_end": _date(window["train_end"]),
+                        "test_start": _date(window["test_start"]), "test_end": _date(window["test_end"]),
+                        "trades": tagged, "open_position": result["open_position"],
+                        "starting_equity": result["equity_curve"][0]["equity"],
+                        "ending_equity": result["equity_curve"][-1]["equity"],
+                        "equity_curve": result["equity_curve"], "metrics": result["metrics"],
+                        "comparisons": result["comparisons"], "audit": result["audit"]})
+    values = [100000.0] + [p["equity"] for p in stitched]
+    comparisons = {}
+    for key in ("buy_hold", "ema50_200"):
+        aggregate = [100000.0]
+        for result in results:
+            window_values = result["comparisons"][key]["equity"]
+            for daily_return in _daily_returns(window_values):
+                aggregate.append(aggregate[-1] * (1 + daily_return))
+        if windows:
+            sample = results[0]["comparisons"][key]
+            comparisons[key] = {"name": sample["name"], "allocation_pct": sample["allocation_pct"],
+                "period_start": _date(windows[0]["test_start"]), "period_end": _date(windows[-1]["test_end"]),
+                "cost_adjusted": True, "metrics": calculate_performance_metrics([], aggregate), "equity": aggregate,
+                "terminal_position_open": any(result["comparisons"][key]["terminal_position_open"] for result in results),
+                "reset_policy": "reset_each_test_window", "boundary_liquidation_fee_applied": False}
+    evaluation_start = _date(windows[0]["test_start"]) if windows else None
+    metadata = _metadata(frame, active_config, commission_bps, slippage_bps, 100000.0, evaluation_start)
+    metadata["evaluation_end"] = _date(windows[-1]["test_end"]) if windows else None
+    return {"status": "completed" if windows else "insufficient_history", "windows": results,
+            "trades": trades, "equity_curve": stitched,
+            "metrics": calculate_performance_metrics(trades, values) if windows else None,
+            "comparisons": comparisons, "metadata": metadata, "exposure": _exposure_summary(stitched),
+            "external_benchmark": {"return_pct": None, "excess_return_pct": None},
+            "audit": {"no_lookahead": True, "mode": "stitched_independent_windows", "window_count": len(results),
+                      "training_optimization": False, "return_synthesis": "independent_window_marked_returns",
+                      "continuous_strategy_equity": False, "window_state_reset": True,
+                      "boundary_liquidation_fee_applied": False}}
 
 
-def calculate_performance_metrics(trades: list[dict[str, Any]]) -> dict[str, Any]:
-    values = _r_multiples(trades)
-    trade_count = len(values)
-    if trade_count == 0:
-        return {
-            "trade_count": 0,
-            "total_r": 0.0,
-            "win_rate": 0.0,
-            "profit_factor": None,
-            "average_r": 0.0,
-            "average_win_r": 0.0,
-            "average_loss_r": 0.0,
-            "maximum_drawdown_r": 0.0,
-            "recovery_factor": None,
-            "sharpe_ratio": None,
-        }
-
-    wins = [value for value in values if value > 0]
-    losses = [value for value in values if value < 0]
-    total_r = sum(values)
-    gross_profit = sum(wins)
-    gross_loss = abs(sum(losses))
-    max_drawdown = _max_drawdown(values)
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
-    recovery_factor = total_r / max_drawdown if max_drawdown > 0 else None
-    sharpe_ratio = _sharpe(values)
-
-    return {
-        "trade_count": trade_count,
-        "total_r": round(total_r, 2),
-        "win_rate": round(len(wins) / trade_count * 100, 2),
-        "profit_factor": round(profit_factor, 2) if profit_factor is not None else None,
-        "average_r": round(total_r / trade_count, 2),
-        "average_win_r": round(gross_profit / len(wins), 2) if wins else 0.0,
-        "average_loss_r": round(sum(losses) / len(losses), 2) if losses else 0.0,
-        "maximum_drawdown_r": round(max_drawdown, 2),
-        "recovery_factor": round(recovery_factor, 2) if recovery_factor is not None else None,
-        "sharpe_ratio": round(sharpe_ratio, 2) if sharpe_ratio is not None else None,
-        "best_trade_r": round(max(values), 2),
-        "worst_trade_r": round(min(values), 2),
-    }
+def _read_csv(path: str) -> pd.DataFrame:
+    data = pd.read_csv(path, parse_dates=["Date"]).set_index("Date")
+    return _clean(data)
 
 
-def evaluate_market_cycle_performance(
-    trades: list[dict[str, Any]],
-    required_cycles: list[str] | None = None,
-    cycle_field: str = "regime",
-) -> dict[str, Any]:
-    required = required_cycles or DEFAULT_MARKET_CYCLES
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for trade in trades:
-        cycle = str(trade.get(cycle_field) or "unknown")
-        grouped.setdefault(cycle, []).append(trade)
-
-    cycles: dict[str, dict[str, Any]] = {}
-    for cycle, cycle_trades in sorted(grouped.items()):
-        cycles[cycle] = {
-            "trade_count": len(cycle_trades),
-            "metrics": calculate_performance_metrics(cycle_trades),
-        }
-
-    observed = sorted(cycles)
-    missing = [cycle for cycle in required if cycle not in cycles]
-    averages = {
-        cycle: float(payload["metrics"].get("average_r", 0.0))
-        for cycle, payload in cycles.items()
-        if int(payload["metrics"].get("trade_count", 0)) > 0
-    }
-    if averages:
-        best_cycle = max(averages, key=lambda cycle: averages[cycle])
-        worst_cycle = min(averages, key=lambda cycle: averages[cycle])
-        average_dispersion = round(averages[best_cycle] - averages[worst_cycle], 2)
-    else:
-        best_cycle = None
-        worst_cycle = None
-        average_dispersion = 0.0
-
-    fragile = bool(missing) or any(value < 0 for value in averages.values()) or average_dispersion >= 2.0
-    return {
-        "cycles": cycles,
-        "coverage": {
-            "required_cycles": required,
-            "observed_cycles": observed,
-            "missing_cycles": missing,
-        },
-        "robustness": {
-            "best_cycle": best_cycle,
-            "worst_cycle": worst_cycle,
-            "average_r_dispersion": average_dispersion,
-            "fragile": fragile,
-        },
-    }
+def _read_benchmark(path: str) -> pd.Series:
+    data = pd.read_csv(path, parse_dates=["Date"])
+    if "Close" not in data or data.Date.isna().any() or data.Date.duplicated().any():
+        raise ValueError("benchmark CSV requires unique Date and Close columns")
+    values = pd.to_numeric(data.Close, errors="raise")
+    if not values.map(lambda value: math.isfinite(value) and value > 0).all():
+        raise ValueError("benchmark Close must be finite and positive")
+    return pd.Series(values.to_numpy(dtype=float), index=pd.DatetimeIndex(data.Date)).sort_index()
 
 
-def _percentile(values: list[float], percentile: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    rank = (len(ordered) - 1) * percentile
-    lower = math.floor(rank)
-    upper = math.ceil(rank)
-    if lower == upper:
-        return ordered[int(rank)]
-    weight = rank - lower
-    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Offline naked-K trend backtest")
+    parser.add_argument("ticker"); parser.add_argument("--csv", required=True)
+    parser.add_argument("--commission-bps", required=True, type=float); parser.add_argument("--slippage-bps", required=True, type=float)
+    parser.add_argument("--output", required=True); parser.add_argument("--benchmark-csv"); parser.add_argument("--config")
+    args = parser.parse_args()
+    result = run_event_backtest(args.ticker, args.ticker, _read_csv(args.csv), commission_bps=args.commission_bps,
+                                slippage_bps=args.slippage_bps, config=load_trading_config(args.config))
+    if args.benchmark_csv:
+        benchmark = _read_benchmark(args.benchmark_csv).reindex(pd.to_datetime([p["date"] for p in result["equity_curve"]]))
+        if benchmark.notna().all() and len(benchmark) > 1:
+            benchmark_return = benchmark.iloc[-1] / benchmark.iloc[0] - 1
+            result["external_benchmark"] = {"return_pct": benchmark_return * 100,
+                "excess_return_pct": result["metrics"]["total_return_pct"] - benchmark_return * 100}
+        else:
+            result["external_benchmark"] = {"return_pct": None, "excess_return_pct": None}
+    output = Path(args.output).resolve()
+    reports = (Path(__file__).parent / "reports").resolve()
+    if not output.is_relative_to(reports):
+        raise ValueError("--output must be under the repository reports/ directory")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False,
+                                 default=lambda value: value.item()), encoding="utf-8")
 
 
-def run_monte_carlo_simulation(
-    trades: list[dict[str, Any]],
-    iterations: int = 1000,
-    seed: int | None = None,
-) -> dict[str, Any]:
-    if iterations <= 0:
-        raise ValueError("iterations must be positive")
-
-    values = _r_multiples(trades)
-    if not values:
-        return {
-            "iterations": iterations,
-            "ending_r_p05": 0.0,
-            "ending_r_p50": 0.0,
-            "ending_r_p95": 0.0,
-            "max_drawdown_r_p50": 0.0,
-            "max_drawdown_r_p95": 0.0,
-        }
-
-    rng = random.Random(seed)
-    ending_values: list[float] = []
-    drawdowns: list[float] = []
-    for _ in range(iterations):
-        sample = values[:]
-        rng.shuffle(sample)
-        ending_values.append(sum(sample))
-        drawdowns.append(_max_drawdown(sample))
-
-    return {
-        "iterations": iterations,
-        "ending_r_p05": round(_percentile(ending_values, 0.05), 2),
-        "ending_r_p50": round(_percentile(ending_values, 0.50), 2),
-        "ending_r_p95": round(_percentile(ending_values, 0.95), 2),
-        "max_drawdown_r_p50": round(_percentile(drawdowns, 0.50), 2),
-        "max_drawdown_r_p95": round(_percentile(drawdowns, 0.95), 2),
-    }
+if __name__ == "__main__":
+    main()

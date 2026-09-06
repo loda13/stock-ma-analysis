@@ -4,13 +4,7 @@
     "max_drawdown_pct": 8.0,
     "consecutive_loss_limit": 3,
     "consecutive_loss_risk_multiplier": 0.5,
-    "action_gross_caps": {
-      "买入": 30.0,
-      "小仓试错": 15.0,
-      "减仓": 10.0,
-      "回避": 0.0,
-      "观望": 0.0
-    }
+    "action_gross_caps": {"买入": 30.0, "小仓试错": 15.0}
   },
   "portfolio": {
     "max_total_gross_pct": 80.0,
@@ -18,26 +12,5 @@
     "max_market_gross_pct": 40.0,
     "max_single_name_gross_pct": 30.0,
     "max_total_account_risk_pct": 3.0
-  },
-  "smart_money": {
-    "enabled": true,
-    "mode": "dual_evidence",
-    "price_action": {
-      "volume_anomaly_threshold": 1.5,
-      "sweep_close_position_threshold": 0.65,
-      "exhaustion_volume_ratio": 0.8
-    },
-    "trade_flow": {
-      "enabled": true,
-      "provider": "eastmoney_hk",
-      "timeout_seconds": 5.0,
-      "max_retries": 1,
-      "persist_raw": true,
-      "require_session_complete": true
-    },
-    "short_selling": {
-      "enabled": true,
-      "provider": "hkex"
-    }
   }
 }
