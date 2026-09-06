@@ -1,113 +1,96 @@
-# Naked K Analysis
+# Daily Swing Trend Analysis · 日线波段趋势分析
 
-裸K交易计划生成器。纯价格结构：BOS/CHoCH、供需区、OHLCV 量价代理证据，生成触发/止损/目标。可选新闻综合。零指标。
+[最新版本 v4.0.0](https://github.com/loda13/naked-k-analysis/releases/tag/v4.0.0) · [变更记录](CHANGELOG.md) · [配置示例](config.example.json)
 
-**当前版本**: [v3.5.1](https://github.com/loda13/naked-k-analysis/releases/tag/v3.5.1)
+日线波段技术趋势评估，适合持有数周至数月。保留原入口 `naked_k_analysis.py`，使用同一套确定性规则生成报告和离线回测。**规则当前为 UNVALIDATED；工程验证不代表盈利能力已验证。**
 
-## 核心能力
+面向A股、港股、美股等市场的研究与复盘：回答趋势方向、趋势强弱、突破是否成立、在哪里失效以及可承受多少风险。输出Markdown和JSON，支持可选账户快照；不连接券商下单。
 
-**价格结构**  
-市场结构（swing/BOS/CHoCH）、供需区、流动性池、OHLCV 量价代理证据、交易剧本、多周期框架、风险计划（1R/2R/3R）
+## 核心信息
 
-**消息面**（`--news`）  
-Yahoo + Google + Finnhub + AkShare + Sina 多源，相关性过滤，两轮综合
+| 信息 | 用途 |
+| --- | --- |
+| EMA20 / 50 / 200 | 短期位置、中期趋势、长期背景 |
+| ADX14 | 趋势强度；不单独判断涨跌 |
+| ATR14 / ATR% | 波动、止损距离和风险预算 |
+| 前20日高低通道 | 首次收盘突破及结构止损 |
+| 相对成交量 | 当前量与之前20日均量比较，仅辅助观察 |
+| 已确认支撑压力 / 锚定VWAP | 价格位置；VWAP为HLC3成交量近似，明确锚点和确认日 |
 
-**回测**  
-事件回测、Walk Forward、R倍数、Monte Carlo、市场周期分桶
+不再生成主力意图、双证据融合、未校准置信评分、日K分摊成交分布或AI买卖方向。新闻只保留来源、日期、标题，不调用模型。没有新增指标依赖。
 
-**数据**  
+## 使用
 
-westock-data CLI → 腾讯K线 → Yahoo chart JSON → yfinance 自动降级，支持港股/A股/北交所/美股/韩股。
-
-## 快速开始
+在独立Python环境中安装：
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/loda13/naked-k-analysis.git
+cd naked-k-analysis
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 python naked_k_analysis.py 0700.HK
-python naked_k_analysis.py 0700.HK TSLA --news
-python naked_k_analysis.py QQQ --json
+```
+
+常用命令：
+
+```bash
+python naked_k_analysis.py 0700.HK TSLA --json
+python naked_k_analysis.py 0700.HK --news
 python -m unittest discover -v
 ```
 
-每次运行必须显式给出一个或多个 ticker。项目不内置股票池，也不设股票白名单；
-`company_names.json` 只为部分标的补充新闻别名和 provider 映射。
+必须显式提供ticker，不内置股票池。行情依次降级：westock-data CLI、腾讯K线、Yahoo chart JSON、yfinance。默认请求3年日K和可选5年周K；周线只显示数据背景和复权检查，不重复参与交易投票。实际日线不足205根时不生成完整趋势方向或新仓计划。
 
-**输出**：`reports/naked_k_latest.md`、`reports/naked_k_journal.jsonl`、
-`reports/naked_k_audit.jsonl`。
+`--news-lookback-days 7 --news-max-items 12` 控制事实附录，窗口外和未来消息按采集层规则过滤。标题未逐条核验正文，不等于事件已经被确认。
 
-## OHLCV 量价代理证据
+输出：`reports/naked_k_latest.md`、`reports/naked_k_journal.jsonl`、`reports/naked_k_audit.jsonl`。JSON及日志schema为 `technical-trend-v1`。日志追加新记录；旧记录保留原样，不自动换算为新规则的历史信号。
 
-默认启用，输出吸筹/卖压衰竭/买盘衰竭/多周期共振四类量价规则信号。该证据未经样本外校准，不能识别机构或“主力”身份，不输出概率。
+## 冻结的首版规则
 
-版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+1. 上涨：收盘 > EMA50 > EMA200，EMA50比5个交易日前高；下跌为相反关系；其余为过渡。ADX低于20显示弱、20到25为发展中、25及以上为强，仅是描述性惯例。
+2. 只有上涨趋势下首次收盘突破**之前20根日K**最高价才产生候选；持续突破不反复产生新仓。EMA采用首N根收盘均值初始化；ATR/ADX采用Wilder平滑。
+3. 仅紧接信号日的下一交易日开盘有效，盘中不追补。最高入场价为 `min(信号收盘 + 0.5 ATR, EMA20 + 2 ATR)`。信号收盘已经过度偏离也不生成候选。实际入场须重新检查止损距离和首个压力区下沿是否至少有1R空间。未接入节假日日历，普通工作日开盘时点之后会保守暂停旧候选，需核对下一有效交易日。
+4. 初始止损为前20日最低价减0.5ATR；后续结构移动止损只收紧。收盘跌破EMA50，已有多头下一交易日开盘退出。没有固定预测目标价，不做空。
+5. 计划仓位由风险预算和止损距离计算，再受单标的、市场和组合容量约束；候选按用户输入顺序分配预算。没有账户数据时这些都是假设预算，不是执行许可或真实账户暴露。
 
-**示例**:
-```
-量价代理: 量价代理偏多（规则强度未校准） | 近3月2次
-分钟线资金流快照: 331根/VWAP 445.76/收盘447.20(+0.32%)
-```
+参数是预先冻结的研究规则，不是经优化得到的最优配置。ADX、成交量和VWAP不参与多项投票或概率计算；以后只有证明存在增量价值才增加过滤器。
 
-配置格式见 `config.example.json`；复制为自己的 JSON 文件后通过 `--config-path` 指定。
+## 账户快照
 
-## 消息面配置（可选）
+[account.example.json](account.example.json) 展示格式。复制为本地 `account.json` 后填写自己的实际数据，并更新 `as_of` 为对应行情日期；示例账户不是实际持仓。`gross_pct` 和 `account_risk_pct` 均为占账户权益的百分比，后者应包含当前持仓的风险估计；`stop_loss` 为已设保护价，也可以为null。当前只支持无杠杆多头持仓。
 
-**无需配置**: Yahoo + Google（默认）  
-**推荐配置**: Finnhub（60 calls/分钟，注册 https://finnhub.io/register）
 ```bash
-echo "FINNHUB_API_KEY=your_key" >> .env
+python naked_k_analysis.py 0700.HK --config-path config.example.json --account-path account.json
 ```
 
-**AkShare**（中文财经）: `pip install akshare`  
-**LLM综合**: 配置 `.env` 里的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `NAKED_K_NEWS_MODEL`
+快照为用户输入，工具不连接券商核验，也不下单。日期过旧或来自未来时暂停新仓预算；缺失时显示 `unknown`。已知回撤达到阈值或账户已超限时停止新仓；连续亏损按配置减少风险。
 
-## 报告字段
+快照仍有持仓、而收盘已触及原保护价时，会提示核实止损订单并安排退出，不假设订单已经成交。
 
-- **action**: 买入/小仓试错/观望/减仓/回避
-- **entry_trigger** / **stop_loss** / **target_price**: 触发/失效/目标
-- **market_structure**: 结构序列、BOS/CHoCH
-- **market_regime**: 趋势/震荡/高波动/压缩
-- **trade_setup**: 交易剧本（BOS延续/CHoCH反转/假突破反打/压缩）
-- **risk_plan**: 单笔风险、账户风险、1R/2R/3R
-- **smart_money_signals**: 未校准的 OHLCV 量价代理证据
-- **news_analysis**: 多源新闻、第一轮结论（`--news`）
-- **combined_conclusion**: 第二轮综合（`--news`）
+止损只是计划，跳空、流动性与交易所限制可能造成更大实际损失。账户风险字段依赖输入质量；百分比预算不自动转换为各市场整手订单。
 
-## 核心逻辑
+## 从 v3.x 迁移到 v4.0.0
 
-**多周期**: 月线定方向 → 周线定结构 → 日线找机会 → 1H确认  
-**市场结构**: 收盘突破前高 → BOS；下降中向上突破 → CHoCH  
-**剧本**: BOS延续、CHoCH反转、假突破反打、压缩等待扩张  
-**触发与止损**: 多头触发 = 高点 + ATR缓冲；失效 = 低点 - ATR缓冲  
-**风险**: 建议仓位 = 账户风险 ÷ 单股风险，受动作上限约束
+- 本次为不兼容升级：报告结构与信号规则已替换。调用方应读取 `technical-trend-v1` schema，不能把v3历史信号拼接成同一策略业绩。
+- `--llm`、`--llm-base-url`、`--llm-model`、`--news-model` 已删除，使用时明确报错。`--news` 改为事实附录。
+- 旧配置的 `smart_money` 字段不再接受，按 `config.example.json` 迁移。旧输出中的AI/资金流/综合动作字段不再生成。
+- MACD、RSI、KDJ、布林带未加入；当前组合已经分别描述方向、强度和波动，避免重复证据。
+- 旧Python模块接口已移除，脚本集成请使用 [naked_k_trend.py](naked_k_trend.py)、[naked_k_planner.py](naked_k_planner.py) 和 [naked_k_backtest.py](naked_k_backtest.py)。CLI入口名保留。
+- `docs/superpowers/` 下旧设计保留作历史，当前设计见 [日线波段精简设计](docs/superpowers/specs/2026-09-06-technical-trend-streamline-design.md)。
 
-## 文件结构
+## 验证
 
-**核心**: `naked_k_analysis.py` (CLI)、`naked_k_planner.py` (编排)、`naked_k_trade.py` (触发/止损)、`naked_k_structure.py` (BOS/CHoCH)、`naked_k_zones.py` (供需区)、`naked_k_smart_money.py` (OHLCV 量价代理)
+v4.0.0发布前，260项离线测试及独立代码审查通过。覆盖指标计算、完整K线与复权处理、风险边界、新闻降级、执行顺序和日志一致性。生成的报告和账户文件保留在本地，不作为仓库源码发布。
 
-**消息面**: `naked_k_news.py` (采集)、`naked_k_news_llm.py` (两轮综合)
+离线回测的输入应包含完整、已收盘的OHLCV，明确费用、滑点和复权口径。使用实际下一日开盘、日内止损及多日持仓；期末未平仓按市值记录。比较同区间买入持有和更简单的EMA规则，明确仓位差异。
 
-**数据与回测**: `westock_wrapper.py` (多源兜底)、`naked_k_backtest.py` (事件回测)
-
-## 参数配置
-
-```json
-{
-  "risk": {
-    "account_risk_pct": 0.8,
-    "max_drawdown_pct": 6.0,
-    "consecutive_loss_limit": 2,
-    "action_gross_caps": {"买入": 20.0, "小仓试错": 8.0}
-  },
-  "smart_money": {
-    "enabled": true
-  }
-}
+```bash
+python naked_k_backtest.py 0700.HK --csv daily.csv --commission-bps 10 --slippage-bps 10 --output reports/backtest.json
 ```
 
-## 免责声明
+CSV列为 `Date,Open,High,Low,Close,Volume`，按日期升序，至少206行才能评估第一个执行日。费用与滑点单位均为单边基点（10基点=0.1%），上述数值仅为命令示例；可选 `--benchmark-csv` 接收 `Date,Close` 基准，缺失则超额收益为null。比较策略采用相同仓位上限，但不采用主策略的结构止损和账户风险过滤，收益差异不能直接当作等风险超额收益。
 
-研究与交易辅助工具，不构成投资建议。需结合个人风险承受能力和独立判断。
+`run_walk_forward_event_backtest(..., train_size=205, test_size=63, commission_bps=10, slippage_bps=10)` 提供冻结参数的非重叠测试窗口。训练段只作指标预热，不优化参数；窗口各自从现金开始，拼接结果不是一条连续持仓的可交易账户轨迹。
 
-## License
-
-MIT — 见 [LICENSE](LICENSE)
+新指标的成本后超额收益尚未获得真实跨市场样本外验证。测试数据只验证计算和交易流程，不能作为收益宣传。交易日历/停牌/涨跌停/最小价位/整手/企业行为和点时复权差异均需在实盘使用前另行核对。

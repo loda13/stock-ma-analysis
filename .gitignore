@@ -5,7 +5,7 @@ __pycache__/
 .omc/
 .superpowers/
 .worktrees/
-reports/*.md
-reports/*.jsonl
-reports/*.json
+reports/
+.venv/
+account.json
 naked_k_reports/

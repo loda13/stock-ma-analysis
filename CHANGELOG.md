@@ -1,9 +1,21 @@
 # Changelog
 
+
+## v4.0.0 — 2026-09-06
+
+- Replace naked-K/AI/Smart Money narratives with a shared daily EMA20/50/200, ADX14, ATR14 and prior-channel trend engine.
+- Retain confirmed structure, explicit-anchor approximate VWAP, data audit, factual news and append-only journals.
+- Separate hypothetical candidate budgets from optional, dated actual account holdings; reject invalid/stale account inputs and retired configuration.
+- Remove institutional-flow inference, pseudo volume profiles, model direction synthesis and their unused code/tests.
+- Replace single-bar phantom-short backtests with cost-aware long/cash multi-day replay and transparent comparisons.
+- New schema: `technical-trend-v1`. Economic effectiveness remains UNVALIDATED.
+- Breaking migration: removed model CLI flags, smart-money configuration and old Python advisor interfaces; retain the main CLI name and historical journal records.
+- Verify 260 offline tests; model next-open fills, gap stops, costs, portfolio limits and independent walk-forward window positions explicitly.
+
 This file keeps a concise history of user-visible changes. Git history and tags
 remain the detailed implementation archive.
 
-## Unreleased
+### Changes since v3.5.1 before the trend migration
 
 - Require one or more explicit ticker arguments for every CLI run.
 - Remove ad-hoc ticker runners and deprecated, production-unreachable trade-flow modules.
